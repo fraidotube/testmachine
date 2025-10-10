@@ -1,0 +1,145 @@
+from fastapi import APIRouter, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from util.shell import run
+import os, re, time
+
+router = APIRouter()
+
+VHOST  = "/etc/apache2/sites-available/testmachine.conf"
+PORTS  = "/etc/apache2/ports.conf"
+TMPDIR = "/var/lib/netprobe/tmp"
+os.makedirs(TMPDIR, exist_ok=True)
+
+def head(title:str)->str:
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'/>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
+        f"<title>{title}</title><link rel='stylesheet' href='/static/styles.css'/></head>"
+        "<body><div class='container'>"
+        "<div class='nav'><div class='brand'>🛠️ TestMachine</div>"
+        "<div class='links'><a href='/'>Home</a><a href='/wan'>WAN</a><a href='/lan'>LAN</a></div></div>"
+    )
+
+def foot()->str:
+    return "</div></body></html>"
+
+def current_port_from_vhost()->int|None:
+    try:
+        with open(VHOST, 'r') as f:
+            txt = f.read()
+        # Cerca "Listen NNNN" oppure "<VirtualHost *:NNNN>"
+        m = re.search(r"(?m)^\s*Listen\s+(\d+)\s*$", txt)
+        if m: return int(m.group(1))
+        m = re.search(r"<VirtualHost\s+\*:(\d+)>", txt)
+        if m: return int(m.group(1))
+    except FileNotFoundError:
+        pass
+    return None
+
+def build_ports_conf()->str:
+    # ports.conf deve rimanere “pulito”: solo 80/443
+    return (
+        "Listen 80\n"
+        "<IfModule ssl_module>\n    Listen 443\n</IfModule>\n"
+        "<IfModule mod_gnutls.c>\n    Listen 443\n</IfModule>\n"
+    )
+
+def build_vhost(new_port:int)->str:
+    # VHost UNICO sulla nuova porta
+    return (
+        f"Listen {new_port}\n"
+        f"<VirtualHost *:{new_port}>\n"
+        "    ServerName testmachine.local\n"
+        "    ProxyPreserveHost On\n"
+        "    ProxyPass        /api/ws ws://127.0.0.1:9000/api/ws\n"
+        "    ProxyPassReverse /api/ws ws://127.0.0.1:9000/api/ws\n"
+        "    ProxyPass        / http://127.0.0.1:9000/\n"
+        "    ProxyPassReverse / http://127.0.0.1:9000/\n"
+        "    ErrorLog /var/log/apache2/testmachine-error.log\n"
+        "    CustomLog /var/log/apache2/testmachine-access.log combined\n"
+        "</VirtualHost>\n"
+    )
+
+@router.get("/", response_class=HTMLResponse)
+def settings_page(request: Request):
+    cur = current_port_from_vhost() or 8080
+    body = (
+        head("Impostazioni") +
+        "<div class='card'><h2>Porta Web (Apache)</h2>"
+        "<form method='post' action='/settings/port' class='form'>"
+        f"<label>Porta</label><input name='port' value='{cur}' />"
+        "<button class='btn'>Applica</button>"
+        "</form>"
+        "<p class='muted'>Dopo il cambio porta, riavviamo Apache con rollback automatico in caso di errore.</p>"
+        "</div>" + foot()
+    )
+    return HTMLResponse(body)
+
+@router.post("/port", response_class=HTMLResponse)
+def set_port(port: int = Form(...)):
+    # Validazioni base
+    if not (1 <= port <= 65535):
+        return HTMLResponse(head("Errore") + "<pre>Porta non valida.</pre>" + foot(), status_code=400)
+    if port in (80, 443, 9000):
+        return HTMLResponse(head("Errore") + "<pre>Porta riservata.</pre>" + foot(), status_code=400)
+
+    cur = current_port_from_vhost()
+    if cur == port:
+        return HTMLResponse(head("Nessuna modifica") + f"<p>La porta è già {port}.</p>" + foot())
+
+    ts = str(int(time.time()))
+    tmp_ports = os.path.join(TMPDIR, f"ports.conf.{ts}")
+    tmp_vhost = os.path.join(TMPDIR, f"testmachine.conf.{ts}")
+
+    # Scrive i file temporanei
+    open(tmp_ports, "w").write(build_ports_conf())
+    open(tmp_vhost, "w").write(build_vhost(port))
+
+    # Copie di backup per eventuale rollback
+    bak_ports = os.path.join(TMPDIR, f"ports.conf.bak.{ts}")
+    bak_vhost = os.path.join(TMPDIR, f"testmachine.conf.bak.{ts}")
+    try:
+        if os.path.exists(PORTS):
+            os.link(PORTS, bak_ports)
+        if os.path.exists(VHOST):
+            os.link(VHOST, bak_vhost)
+    except OSError:
+        pass  # se hardlink fallisce, pazienza: i file tmp hanno comunque la nuova versione
+
+    # Installa i file (richiede sudoers già configurato per netprobe)
+    r1 = run(["sudo","/usr/bin/install","-m","644", tmp_ports, PORTS])
+    r2 = run(["sudo","/usr/bin/install","-m","644", tmp_vhost, VHOST])
+    if r1["status"]!="ok" or r2["status"]!="ok":
+        return HTMLResponse(head("Errore") + f"<pre>{r1}\n{r2}</pre>" + foot(), status_code=500)
+
+    # Testa configurazione
+    t = run(["/usr/sbin/apache2ctl","configtest"])
+    if t["status"]!="ok":
+        # rollback
+        if os.path.exists(bak_ports):
+            run(["sudo","/usr/bin/install","-m","644", bak_ports, PORTS])
+        if os.path.exists(bak_vhost):
+            run(["sudo","/usr/bin/install","-m","644", bak_vhost, VHOST])
+        return HTMLResponse(head("Errore") + "<pre>apache2ctl configtest FAILED\n</pre>" + foot(), status_code=500)
+
+    # Riavvia Apache
+    rr = run(["sudo","/bin/systemctl","restart","apache2"])
+    if rr["status"]!="ok":
+        # rollback
+        if os.path.exists(bak_ports):
+            run(["sudo","/usr/bin/install","-m","644", bak_ports, PORTS])
+        if os.path.exists(bak_vhost):
+            run(["sudo","/usr/bin/install","-m","644", bak_vhost, VHOST])
+        run(["/usr/sbin/apache2ctl","configtest"])
+        run(["sudo","/bin/systemctl","restart","apache2"])
+        return HTMLResponse(head("Errore") + "<pre>Riavvio Apache fallito. Rollback eseguito.</pre>" + foot(), status_code=500)
+
+    # OK
+    msg = (
+        head("Porta cambiata") +
+        f"<p>Porta impostata a <b>{port}</b>. Apri la nuova URL: "
+        f"<a class='btn' href='http://{request.client.host}:{port}/'>http://{request.client.host}:{port}/</a></p>"
+        "<p class='muted'>Se non risponde, ricarica la pagina o prova da un altro browser.</p>" +
+        foot()
+    )
+    return HTMLResponse(msg)

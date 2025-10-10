@@ -1,0 +1,95 @@
+from fastapi import APIRouter, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from util.shell import run
+import os, re
+
+router = APIRouter()
+CONF = '/etc/apache2/conf-available/testmachine-ports.conf'
+VHOST = '/etc/apache2/sites-available/testmachine.conf'
+TMPDIR = '/var/lib/netprobe/tmp'
+os.makedirs(TMPDIR, exist_ok=True)
+
+def head(title:str)->str:
+    return f"""<!doctype html><html><head><meta charset='utf-8'/>
+    <meta name='viewport' content='width=device-width,initial-scale=1'/>
+    <title>{title}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>
+    <div class='container'><div class='nav'><div class='brand'>🛠️ TestMachine</div>
+    <div class='links'><a href='/'>Home</a><a href='/wan'>WAN</a><a href='/lan'>LAN</a></div></div>"""
+
+@router.get("/", response_class=HTMLResponse)
+def page(request: Request):
+    return head("Impostazioni") + """
+    <div class='grid'><div class='card'>
+      <h2>Porta Web (Apache)</h2>
+      <form method='post' action='/settings/port'>
+        <label>Porta</label><input name='port' type='number' min='1' max='65535' value='8082'/>
+        <button class='btn' type='submit'>Applica</button>
+      </form>
+      <p class='notice'>8080 resta sempre attiva come porta di back-up.</p>
+    </div></div></div></body></html>"""
+
+def parse_listens(text:str)->set[int]:
+    return set(int(m.group(1)) for m in re.finditer(r'^\s*Listen\s+(\d+)\s*$', text, flags=re.M))
+
+def write_listens(ports:set[int])->str:
+    ports = sorted(ports | {8080})  # 8080 sempre
+    return "".join(f"Listen {p}\n" for p in ports)
+
+def build_vhost(ports:set[int])->str:
+    # Genera un blocco <VirtualHost> per OGNI porta
+    tmpl = """
+<VirtualHost *:{p}>
+    ServerName testmachine.local
+    ProxyPreserveHost On
+    ProxyPass        /api/ws ws://127.0.0.1:9000/api/ws
+    ProxyPassReverse /api/ws ws://127.0.0.1:9000/api/ws
+    ProxyPass        / http://127.0.0.1:9000/
+    ProxyPassReverse / http://127.0.0.1:9000/
+    ErrorLog $${{APACHE_LOG_DIR}}/testmachine-error.log
+    CustomLog $${{APACHE_LOG_DIR}}/testmachine-access.log combined
+</VirtualHost>
+"""
+    return "\n".join(tmpl.format(p=p) for p in sorted(ports | {8080}))
+
+@router.post("/port")
+def set_port(port: int = Form(...)):
+    # 1) Leggi conf Listen corrente (fallback 8080+8081)
+    try:
+        current = open(CONF,'r').read()
+    except FileNotFoundError:
+        current = "Listen 8080\nListen 8081\n"
+    if not current.strip():
+        current = "Listen 8080\nListen 8081\n"
+
+    ports = parse_listens(current)
+    ports.add(8080)  # sempre
+    ports.add(port) # nuova porta richiesta
+
+    # 2) Scrivi conf Listen
+    tmp_conf = os.path.join(TMPDIR, 'testmachine-ports.conf')
+    open(tmp_conf,'w').write(write_listens(ports))
+    rc1, out1, err1 = run(["sudo","-n","/usr/bin/install","-m","644",tmp_conf, CONF])
+    if rc1 != 0:
+        return JSONResponse({"status":"error","step":"install conf","out":out1,"err":err1}, status_code=500)
+
+    # 3) Rigenera vhost con tutte le porte
+    tmp_vhost = os.path.join(TMPDIR, 'testmachine.conf')
+    open(tmp_vhost,'w').write(build_vhost(ports))
+    rc2, out2, err2 = run(["sudo","-n","/usr/bin/install","-m","644",tmp_vhost, VHOST])
+    if rc2 != 0:
+        return JSONResponse({"status":"error","step":"install vhost","out":out2,"err":err2}, status_code=500)
+
+    # 4) Abilita sito (idempotente) e moduli necessari
+    run(["/usr/sbin/a2ensite","testmachine.conf"])
+    run(["/usr/sbin/a2enmod","proxy","proxy_http","proxy_wstunnel","rewrite","headers"])
+
+    # 5) Verifica e restart
+    rcT, outT, errT = run(["/usr/sbin/apache2ctl","configtest"])
+    if rcT != 0 or "Syntax OK" not in (outT + errT):
+        return JSONResponse({"status":"error","step":"apache2ctl configtest","out":outT,"err":errT}, status_code=500)
+
+    rcR, outR, errR = run(["sudo","-n","/bin/systemctl","restart","apache2"])
+    if rcR != 0:
+        return JSONResponse({"status":"error","step":"restart apache","out":outR,"err":errR}, status_code=500)
+
+    return HTMLResponse(head("Impostazioni") + f"<div class='grid'><div class='card'><h2 class='ok'>Porta aggiunta: {port} (8080 resta attiva)</h2><a class='btn secondary' href='/settings'>Indietro</a></div></div></div></body></html>")

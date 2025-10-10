@@ -1,0 +1,14 @@
+[Unit]
+Description=TestMachine API (FastAPI)
+After=network-online.target
+
+[Service]
+User=netprobe
+Group=netprobe
+WorkingDirectory=/opt/netprobe/app
+Environment="PYTHONPATH=/opt/netprobe/app"
+ExecStart=/opt/netprobe/venv/bin/uvicorn main:app --host 127.0.0.1 --port 9000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

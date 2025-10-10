@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+
+# Env / venv
+.env
+.env.*
+venv/
+.venv/
+
+# Editor/IDE
+.vscode/
+.idea/
+
+# Log / tmp
+*.log
+logs/
+tmp/
+var/
+*.tar.gz
+
+# Node (se mai presente)
+node_modules/

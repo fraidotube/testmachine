@@ -1,0 +1,13 @@
+<VirtualHost *:{{ port }}>
+    ServerName testmachine.local
+
+    ProxyPreserveHost On
+    ProxyPass        /api/ws ws://127.0.0.1:9000/api/ws
+    ProxyPassReverse /api/ws ws://127.0.0.1:9000/api/ws
+
+    ProxyPass        / http://127.0.0.1:9000/
+    ProxyPassReverse / http://127.0.0.1:9000/
+
+    ErrorLog ${APACHE_LOG_DIR}/testmachine-error.log
+    CustomLog ${APACHE_LOG_DIR}/testmachine-access.log combined
+</VirtualHost>

@@ -1,0 +1,5 @@
+netprobe ALL=(root) NOPASSWD: \
+  /bin/systemctl reload apache2, /bin/systemctl restart apache2, \
+  /usr/sbin/a2ensite, /usr/sbin/a2dissite, /usr/sbin/a2enmod, /usr/sbin/a2dismod, \
+  /usr/bin/nmcli *, /usr/sbin/ip, \
+  /usr/bin/tcpdump, /usr/bin/dumpcap, /usr/bin/kill

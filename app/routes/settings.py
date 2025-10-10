@@ -1,0 +1,125 @@
+import os, re
+from fastapi import APIRouter, Request, Form, BackgroundTasks
+from fastapi.responses import HTMLResponse
+from util.shell import run
+
+router = APIRouter()
+
+def head(title:str)->str:
+    return f"""<!doctype html><html><head><meta charset='utf-8'/>
+    <meta name='viewport' content='width=device-width,initial-scale=1'/>
+    <title>{title}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>
+    <div class='container'><div class='nav'><div class='brand'>🛠️ TestMachine</div>
+    <div class='links'><a href='/'>Home</a><a href='/wan'>WAN</a><a href='/lan'>LAN</a></div></div>"""
+
+def _self_ip() -> str:
+    rc, out, _ = run(["/usr/sbin/ip","route","get","1.1.1.1"])
+    if rc == 0:
+        m = re.search(r"\bsrc\s+(\d+\.\d+\.\d+\.\d+)", out)
+        if m: return m.group(1)
+    rc, out, _ = run(["/usr/sbin/ip","-4","-o","addr","show","scope","global","up"])
+    if rc == 0:
+        m = re.search(r"(\d+\.\d+\.\d+\.\d+)", out)
+        if m: return m.group(1)
+    return "127.0.0.1"
+
+def _current_port() -> int:
+    try:
+        with open("/etc/apache2/sites-available/testmachine.conf","r") as f:
+            m = re.search(r"<VirtualHost\s+\*:(\d+)>", f.read())
+            if m: return int(m.group(1))
+    except Exception:
+        pass
+    return 8080
+
+@router.get("/", response_class=HTMLResponse)
+def settings_home(request: Request):
+    cur = _current_port()
+    return head("Impostazioni") + f"""
+    <div class='grid'><div class='card'>
+      <h2>Porta Web (Apache)</h2>
+      <form method='post' action='/settings/port'>
+        <label>Porta</label>
+        <input name='port' value='{cur}' pattern='[0-9]{{2,5}}' required />
+        <button class='btn' type='submit'>Applica</button>
+      </form>
+      <p class='notice'>Dopo il cambio porta verrai reindirizzato automaticamente.</p>
+    </div></div></div></body></html>"""
+
+def _apply_port_change(tmp_ports, tmp_vhost, bak_ports, bak_vhost):
+    import time
+    # piccolo delay per lasciare al client il tempo di ricevere la risposta
+    time.sleep(0.7)
+
+    # installa i file
+    r1 = run(["sudo","-n","/usr/bin/install","-m","644", tmp_ports, "/etc/apache2/ports.conf"])
+    r2 = run(["sudo","-n","/usr/bin/install","-m","644", tmp_vhost, "/etc/apache2/sites-available/testmachine.conf"])
+    run(["sudo","-n","/usr/sbin/a2ensite","testmachine"])
+    r3 = run(["sudo","-n","/bin/systemctl","restart","apache2"])
+
+    # rollback in caso di problemi
+    if r1[0]!=0 or r2[0]!=0 or r3[0]!=0:
+        if os.path.exists(bak_ports):
+            run(["sudo","-n","/usr/bin/install","-m","644", bak_ports, "/etc/apache2/ports.conf"])
+        if os.path.exists(bak_vhost):
+            run(["sudo","-n","/usr/bin/install","-m","644", bak_vhost, "/etc/apache2/sites-available/testmachine.conf"])
+        run(["sudo","-n","/bin/systemctl","restart","apache2"])
+
+@router.post("/port")
+def set_port(background_tasks: BackgroundTasks, port: int = Form(...)):
+    tmpdir = "/var/lib/netprobe/tmp"
+    os.makedirs(tmpdir, exist_ok=True)
+    tag = str(os.getpid())
+
+    tmp_ports = os.path.join(tmpdir, f"ports.conf.{tag}")
+    tmp_vhost = os.path.join(tmpdir, f"testmachine.conf.{tag}")
+    bak_ports = os.path.join(tmpdir, f"ports.conf.bak.{tag}")
+    bak_vhost = os.path.join(tmpdir, f"testmachine.conf.bak.{tag}")
+
+    ports_txt = f"""Listen 80
+<IfModule ssl_module>
+    Listen 443
+</IfModule>
+<IfModule mod_gnutls.c>
+    Listen 443
+</IfModule>
+Listen {port}
+"""
+    vhost_txt = f"""<VirtualHost *:{port}>
+    ServerName testmachine.local
+    ProxyPreserveHost On
+    ProxyPass        /api/ws ws://127.0.0.1:9000/api/ws
+    ProxyPassReverse /api/ws ws://127.0.0.1:9000/api/ws
+    ProxyPass        / http://127.0.0.1:9000/
+    ProxyPassReverse / http://127.0.0.1:9000/
+    ErrorLog /var/log/apache2/testmachine-error.log
+    CustomLog /var/log/apache2/testmachine-access.log combined
+</VirtualHost>
+"""
+
+    # backup (se esistono)
+    if os.path.exists("/etc/apache2/ports.conf"):
+        run(["/usr/bin/install","-m","644","/etc/apache2/ports.conf", bak_ports])
+    if os.path.exists("/etc/apache2/sites-available/testmachine.conf"):
+        run(["/usr/bin/install","-m","644","/etc/apache2/sites-available/testmachine.conf", bak_vhost])
+
+    # scrivi temporanei
+    with open(tmp_ports,"w") as f: f.write(ports_txt)
+    with open(tmp_vhost,"w") as f: f.write(vhost_txt)
+
+    # SCHEDULA l'applicazione/riavvio in background
+    background_tasks.add_task(_apply_port_change, tmp_ports, tmp_vhost, bak_ports, bak_vhost)
+
+    # restituisci SUBITO una pagina con redirect
+    ip = _self_ip()
+    target = f"http://{ip}:{port}/settings/"
+    html = head("Impostazioni") + f"""
+    <div class='grid'><div class='card'>
+      <h2 class='ok'>Porta impostata a {port}</h2>
+      <p>Riavvio di Apache in corso. Verrai reindirizzato automaticamente.</p>
+      <p>Se non succede, clicca: <a class='btn' href="{target}">{target}</a></p>
+    </div></div></div>
+    <meta http-equiv="refresh" content="3; url={target}">
+    <script>setTimeout(function(){{ location.replace("{target}"); }}, 3000);</script>
+    </body></html>"""
+    return HTMLResponse(html)

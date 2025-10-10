@@ -8,7 +8,7 @@ def head(title:str)->str:
     return f"""<!doctype html><html><head><meta charset='utf-8'/>
     <meta name='viewport' content='width=device-width,initial-scale=1'/>
     <title>{title}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>
-    <div class='container'><div class='nav'><div class='brand'>🛠️ TestMachine</div>
+    <div class='container'><div class='nav'><div class='brand'><img src='/static/img/CNS-21-LOGO-BIANCO.svg' alt='Logo' class='logo'/><span>TestMachine</span></div>
     <div class='links'><a href='/'>Home</a><a href='/lan'>LAN</a><a href='/settings'>Impostazioni</a></div></div>"""
 
 def list_ifaces():

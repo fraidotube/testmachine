@@ -60,3 +60,14 @@ input::placeholder{color:#87a6cc}
 .brand span {
   line-height: 1;
 }
+
+/* LOGO CNS-21 */
+.nav .brand{display:flex;align-items:center;gap:.5rem;font-weight:600}
+.nav .brand::before{
+  content:"";
+  display:inline-block;
+  width:26px;height:26px;
+  background:url("/static/img/CNS-21-LOGO-BIANCO.svg") no-repeat center/contain;
+  /* bordo leggero per visibilità su sfondo chiaro */
+  filter: drop-shadow(0 0 1px rgba(0,0,0,.35));
+}

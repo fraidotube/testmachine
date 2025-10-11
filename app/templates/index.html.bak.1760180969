@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>TestMachine</title>
+  <link rel="stylesheet" href="/static/styles.css"/>
+</head>
+<body>
+  <div class="container">
+    <!-- NAV (home con tutte le scorciatoie) -->
+    <div class="nav">
+      <div class="brand">
+        <img src="/static/img/logo.svg" alt="Logo" class="logo"><span>TestMachine</span>
+      </div>
+      <div class="links">
+        <a href="/wan">WAN</a>
+        <a href="/lan">LAN</a>
+        <a href="/settings">Impostazioni Aggiuntive</a>
+        <a href="/smokeping/">Smokeping</a>
+        <a href="/sp-admin">SP&nbsp;Admin</a>
+      </div>
+    </div>
+
+    <!-- SEZIONE: STRUMENTI -->
+    <h2 class="section-title">Strumenti</h2>
+    <div class="grid">
+      <div class="card">
+        <h2>SmokePing</h2>
+        <p class="muted">Grafici di latenza e perdita pacchetti.</p>
+        <a class="btn" href="/smokeping/">Apri SmokePing</a>
+      </div>
+    </div>
+
+    <!-- SEZIONE: IMPOSTAZIONI -->
+    <h2 class="section-title">Impostazioni Aggiuntive</h2>
+    <div class="grid">
+      <div class="card">
+        <h2>WAN</h2>
+        <p class="muted">Configura DHCP, Statico o PPPoE sull’interfaccia WAN.</p>
+        <a class="btn" href="/wan">Apri WAN</a>
+      </div>
+      <div class="card">
+        <h2>LAN</h2>
+        <p class="muted">Configura IP sulla LAN usata per le diagnosi.</p>
+        <a class="btn" href="/lan">Apri LAN</a>
+      </div>
+      <div class="card">
+        <h2>SmokePing Admin</h2>
+        <p class="muted">Aggiungi/rimuovi target, cambia probe, riavvia servizio.</p>
+        <a class="btn" href="/sp-admin">Apri SP&nbsp;Admin</a>
+      </div>
+      <div class="card">
+        <h2>Impostazioni Aggiuntive</h2>
+        <p class="muted">Cambia la porta web (default 8080) e altre preferenze.</p>
+        <a class="btn" href="/settings">Apri Impostazioni Aggiuntive</a>
+      </div>
+    </div>
+
+    <div class="footer">© TestMachine – Debian 12</div>
+  </div>
+</body>
+</html>

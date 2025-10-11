@@ -1,0 +1,85 @@
+from fastapi import APIRouter, Request, Query
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from util.shell import run
+import re, time
+
+router = APIRouter()
+TARGETS = "/etc/smokeping/config.d/Targets"
+
+def head(title:str)->str:
+    return f"""<!doctype html><html><head><meta charset='utf-8'/>
+    <meta name='viewport' content='width=device-width,initial-scale=1'/>
+    <title>{title}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>
+    <div class='container'><div class='nav'><div class='brand'><img src='/static/img/logo.svg' alt='Logo' class='logo'><span>TestMachine</span></div>
+    <div class='links'><a href='/'>Home</a></div></div>"""
+
+@router.get("/", response_class=HTMLResponse)
+def page(request: Request):
+    return head("SmokePing Admin") + """
+    <div class='grid'><div class='card'>
+      <h2>SmokePing Admin</h2>
+      <p>Sezione amministrativa minima. Qui gestisci target e servizio.</p>
+      <div class='row'>
+        <a class='btn secondary' href='/smokeping/'>Apri interfaccia SmokePing</a>
+        <a class='btn secondary' href='/sp-admin/targets'>Vedi/gestisci Targets</a>
+      </div>
+      <p><a class='btn danger' href='/sp-admin/restart'>Riavvia servizio</a></p>
+    </div></div></div></body></html>"""
+
+def ensure_group(text:str)->str:
+    # assicura che esista il gruppo "+ TestMachine"
+    if re.search(r'(?m)^\+ +TestMachine\s*$', text):
+        return text
+    return text.rstrip() + "\n\n+ TestMachine\nmenu = TestMachine\ntitle = TestMachine\n"
+
+@router.get("/hosts/add")
+def add_host(name: str = Query(...), address: str = Query(...), probe: str = Query("FPing")):
+    # slug semplice
+    slug = re.sub(r'[^A-Za-z0-9_]+', '_', name).strip('_') or "Host"
+
+    # backup Targets
+    run(["sudo","cp","-a",f"{TARGETS}",f"{TARGETS}.bak.{int(time.time())}"])
+
+    # leggi e garantisci gruppo
+    with open(TARGETS,"r",encoding="utf-8") as f:
+        txt = f.read()
+    txt = ensure_group(txt)
+
+    # blocco con ordine corretto: probe PRIMA di host
+    block = f"""\n++ {slug}
+menu = {name}
+title = {name}
+probe = {probe}
+host = {address}
+"""
+
+    # inserisci subito dopo la riga "+ TestMachine"
+    new = re.sub(r'(?m)^(\+ +TestMachine\s*\n(?:.*\n)*)', r'\1'+block, txt, count=1)
+
+    with open(TARGETS,"w",encoding="utf-8") as f:
+        f.write(new)
+
+    # check sintassi
+    rc_out = run(["sudo","smokeping","--check"])
+    if rc_out[0] != 0:
+        # ripristina se errore
+        run(["sudo","cp","-a",f"{TARGETS}.bak.{int(time.time())}", TARGETS])
+        return JSONResponse({"status":"error","detail":"Config non valida","check_out":rc_out[1],"check_err":rc_out[2]}, status_code=400)
+
+    # reload/ restart
+    run(["sudo","systemctl","restart","smokeping"])
+    # apri direttamente l’interfaccia di smokeping (comoda)
+    return RedirectResponse(url="/smokeping/", status_code=302)
+
+@router.get("/targets", response_class=HTMLResponse)
+def view_targets(request: Request):
+    with open(TARGETS,"r",encoding="utf-8") as f:
+        body = f"<pre>{f.read().replace('&','&amp;').replace('<','&lt;')}</pre>"
+    return head("Targets") + f"<div class='grid'><div class='card'><h2>Targets</h2>{body}</div></div></div></body></html>"
+
+@router.get("/restart")
+def restart():
+    rc,out,err = run(["sudo","systemctl","restart","smokeping"])
+    if rc==0:
+        return JSONResponse({"status":"ok"})
+    return JSONResponse({"status":"error","out":out,"err":err}, status_code=500)

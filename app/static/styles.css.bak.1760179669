@@ -125,28 +125,3 @@ input::placeholder{color:#87a6cc}
   border: 1px solid rgba(16,185,129,.20); /* emerald-500 */
   background: linear-gradient(180deg, rgba(5,150,105,.14), rgba(17,24,39,.55));
 }
-
-/* === Overrides: cards sezione Impostazioni (più verso il bianco) === */
-.section.settings .card,
-.grid.settings .card,
-.card.settings,
-.card.config,
-.grid-admin .card {
-  background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.035)) !important;
-  border: 1px solid rgba(255,255,255,0.08) !important;
-  box-shadow: 0 12px 28px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.04) !important;
-}
-
-/* --- FULL-PAGE BACKDROP (copre sempre tutta la pagina) --- */
-html, body { height: 100%; }
-body { min-height: 100%; background: #0b2239; } /* fallback */
-body::before{
-  content:"";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  /* gradient principale (puoi regolarlo più avanti) */
-  background:
-    radial-gradient(1200px 520px at 50% 0%, rgba(75,120,190,0.22) 0%, rgba(11,34,57,0) 70%),
-    linear-gradient(#0d2744, #091a2c);
-}

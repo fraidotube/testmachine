@@ -1,0 +1,184 @@
+from fastapi import APIRouter, Request, Form
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from util.shell import run
+import os, re, html, time
+
+router = APIRouter()
+
+TARGETS = "/etc/smokeping/config.d/Targets"
+BEGIN = "# BEGIN TM_MANAGED"
+END   = "# END TM_MANAGED"
+GROUP = "TestMachine"
+
+def head(title:str)->str:
+    return f"""<!doctype html><html><head><meta charset='utf-8'/>
+    <meta name='viewport' content='width=device-width,initial-scale=1'/>
+    <title>{title}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>
+    <div class='container'><div class='nav'>
+      <div class='brand'><img src='/static/img/logo.svg' alt='Logo' class='logo'><span>TestMachine</span></div>
+      <div class='links'><a href='/'>Home</a></div>
+    </div>"""
+
+def read_text(path:str)->str:
+    try:
+        with open(path,"r") as f: return f.read()
+    except FileNotFoundError:
+        return ""
+
+def ensure_managed_block(txt:str)->str:
+    if BEGIN in txt and END in txt:
+        return txt
+    block = f"""
+{BEGIN}
++ {GROUP}
+menu = {GROUP}
+title = Hosts gestiti da TestMachine
+
+{END}
+""".lstrip("\n")
+    return (txt.rstrip()+"\n\n"+block).rstrip()+"\n"
+
+def list_entries(txt:str):
+    m = re.search(re.escape(BEGIN)+r"(.*?)"+re.escape(END), txt, flags=re.S)
+    items=[]
+    if not m: return items
+    body = m.group(1)
+    # sezioni che iniziano con "++ <slug>"
+    for sect in re.split(r"(?m)^\+\+\s+", body):
+        sect = sect.strip()
+        if not sect: continue
+        first, rest = (sect.split("\n",1)+[""])[:2]
+        slug = first.strip()
+        mm = re.search(r"(?m)^menu\s*=\s*(.+)\s*$", rest); label = mm.group(1).strip() if mm else slug
+        mm = re.search(r"(?m)^host\s*=\s*(.+)\s*$", rest); host  = mm.group(1).strip() if mm else ""
+        items.append({"slug":slug,"label":label,"host":host})
+    return items
+
+def write_targets(new_txt:str):
+    os.makedirs("/opt/netprobe/tmp", exist_ok=True)
+    tmp = f"/opt/netprobe/tmp/Targets.new.{int(time.time())}"
+    with open(tmp,"w") as f: f.write(new_txt)
+    return run(["sudo","-n","install","-m","0644","-o","root","-g","root",tmp,TARGETS])
+
+def validate_config():
+    # la check non richiede root
+    return run(["/usr/sbin/smokeping","--check"])
+
+@router.get("/", response_class=HTMLResponse)
+def page_root(request: Request):
+    return head("SmokePing Admin") + """
+    <div class='grid'><div class='card'>
+      <h2>SmokePing Admin</h2>
+      <p>Sezione amministrativa minima. Qui gestisci target e servizio.</p>
+      <div class='row'>
+        <a class='btn' href='/smokeping/'>Apri interfaccia SmokePing</a>
+        <a class='btn secondary' href='/sp-admin/hosts'>Vedi/gestisci Targets</a>
+      </div>
+      <form method='post' action='/sp-admin/restart' style='margin-top:16px'>
+        <button class='btn danger' type='submit'>Riavvia servizio</button>
+      </form>
+    </div></div></div></body></html>"""
+
+@router.post("/restart")
+def restart_service():
+    rc,out,err = run(["sudo","-n","systemctl","restart","smokeping"])
+    if rc!=0:
+        return JSONResponse({"status":"error","out":out,"err":err}, status_code=500)
+    return RedirectResponse(url="/sp-admin/", status_code=303)
+
+@router.get("/hosts", response_class=HTMLResponse)
+def hosts_page(request: Request):
+    txt  = ensure_managed_block(read_text(TARGETS))
+    items = list_entries(txt)
+    rows = "".join(f"<tr><td>{html.escape(i['label'])}</td><td>{html.escape(i['host'])}</td>"
+                   f"<td><form method='post' action='/sp-admin/hosts/del' style='display:inline'>"
+                   f"<input type='hidden' name='slug' value='{html.escape(i['slug'])}'/>"
+                   f"<button class='btn danger' type='submit'>Elimina</button></form></td></tr>"
+                   for i in items) or "<tr><td colspan='3' class='muted'>Nessun host gestito.</td></tr>"
+    return head("SmokePing Admin - Targets") + f"""
+    <div class='grid'><div class='card'>
+      <h2>Targets gestiti</h2>
+      <table class='table'><thead><tr><th>Nome</th><th>Host</th><th></th></tr></thead>
+      <tbody>{rows}</tbody></table>
+      <h3 style='margin-top:24px'>Aggiungi Target</h3>
+      <form method='post' action='/sp-admin/hosts/add'>
+        <div class='row'>
+          <div><label>Nome (etichetta)</label><input name='label' required/></div>
+          <div><label>Host/IP</label><input name='host' required placeholder='8.8.8.8 or example.com'/></div>
+        </div>
+        <button class='btn' type='submit'>Aggiungi</button>
+      </form>
+      <p class='muted'>I target vengono creati sotto il gruppo “{GROUP}” usando il probe predefinito (FPing).</p>
+    </div></div></div></body></html>"""
+
+def slugify(s:str)->str:
+    s = re.sub(r"[^A-Za-z0-9_-]+","-", s.strip().lower()).strip("-")
+    return s or "host"
+
+@router.post("/hosts/add")
+def add_host(label: str = Form(...), host: str = Form(...)):
+    label = label.strip()
+    host  = host.strip()
+    slug  = slugify(label if label else host)
+
+    original = read_text(TARGETS)
+    txt = ensure_managed_block(original)
+
+    # già presente?
+    if re.search(re.escape(BEGIN)+r".*?^\+\+\s+"+re.escape(slug)+r"\s*$.*?"+re.escape(END),
+                 txt, flags=re.S|re.M):
+        return JSONResponse({"status":"error","detail":"Esiste già un target con questo nome."}, status_code=400)
+
+    section = f"""
+++ {slug}
+menu = {label}
+title = {label}
+host = {host}
+""".lstrip("\n")
+
+    # inserisci prima dell'END
+    new_txt = re.sub(re.escape(END), section + END, txt, count=1)
+
+    rc,out,err = write_targets(new_txt)
+    if rc!=0:
+        return JSONResponse({"status":"error","out":out,"err":err}, status_code=500)
+
+    rc,out,err = validate_config()
+    if rc!=0 or "syntax OK" not in (out+err):
+        # ripristina
+        write_targets(original)
+        return JSONResponse({"status":"error","detail":"Config non valida", "check_out":out, "check_err":err}, status_code=400)
+
+    run(["sudo","-n","systemctl","reload","smokeping"])
+    return RedirectResponse(url="/sp-admin/hosts", status_code=303)
+
+@router.post("/hosts/del")
+def del_host(slug: str = Form(...)):
+    slug = slug.strip()
+    original = read_text(TARGETS)
+    txt = ensure_managed_block(original)
+
+    m = re.search(re.escape(BEGIN)+r"(.*?)"+re.escape(END), txt, flags=re.S)
+    if not m:
+        return JSONResponse({"status":"error","detail":"Blocco gestito non trovato"}, status_code=500)
+
+    body = m.group(1)
+
+    # rimuovi la sezione "++ slug" (fino alla prossima "++" o fine blocco)
+    body2, n = re.subn(rf"(?ms)^\+\+\s+{re.escape(slug)}\s*\n(?:.*?\n)*?(?=^\+\+\s+|\Z)", "", body)
+    if n == 0:
+        return JSONResponse({"status":"error","detail":"Target non trovato"}, status_code=404)
+
+    new_txt = txt[:m.start(1)] + body2 + txt[m.end(1):]
+
+    rc,out,err = write_targets(new_txt)
+    if rc!=0:
+        return JSONResponse({"status":"error","out":out,"err":err}, status_code=500)
+
+    rc,out,err = validate_config()
+    if rc!=0 or "syntax OK" not in (out+err):
+        write_targets(original)
+        return JSONResponse({"status":"error","detail":"Config non valida dopo rimozione", "check_out":out, "check_err":err}, status_code=400)
+
+    run(["sudo","-n","systemctl","reload","smokeping"])
+    return RedirectResponse(url="/sp-admin/hosts", status_code=303)

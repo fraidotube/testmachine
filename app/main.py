@@ -26,7 +26,7 @@ app.include_router(settings_router, prefix="/settings")
 # (Opzionale) pannello admin Smokeping: non deve rompere se non esiste
 try:
     from routes.sp_admin import router as sp_admin_router  # type: ignore
-    app.include_router(sp_admin_router, prefix="/sp-admin")
+    app.include_router(sp_admin_router)
 except Exception:
     # niente admin, ma l app deve comunque avviarsi
     pass

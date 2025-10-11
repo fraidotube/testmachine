@@ -154,8 +154,8 @@ Cmnd_Alias NP_SVC = \
 
 # NTP / timezone
 Cmnd_Alias NP_TIME = \
-  /usr/bin/timedatectl set-ntp *, \
-  /usr/bin/timedatectl set-timezone *
+  /usr/bin/timedatectl *, \
+  /bin/timedatectl *
 
 # NetworkManager (WAN/LAN)
 Cmnd_Alias NP_NM = \

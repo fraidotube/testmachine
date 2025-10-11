@@ -8,8 +8,11 @@
 </head>
 <body>
   <div class="container">
+    <!-- NAV (home con tutte le scorciatoie) -->
     <div class="nav">
-      <div class="brand"><img src="/static/img/logo.svg" alt="Logo" class="logo"><span>TestMachine</span></div>
+      <div class="brand">
+        <img src="/static/img/logo.svg" alt="Logo" class="logo"><span>TestMachine</span>
+      </div>
       <div class="links">
         <a href="/wan">WAN</a>
         <a href="/lan">LAN</a>
@@ -19,6 +22,18 @@
       </div>
     </div>
 
+    <!-- SEZIONE: STRUMENTI -->
+    <h2 class="section-title">Strumenti</h2>
+    <div class="grid">
+      <div class="card">
+        <h2>SmokePing</h2>
+        <p class="muted">Grafici di latenza e perdita pacchetti.</p>
+        <a class="btn" href="/smokeping/">Apri SmokePing</a>
+      </div>
+    </div>
+
+    <!-- SEZIONE: IMPOSTAZIONI -->
+    <h2 class="section-title">Impostazioni</h2>
     <div class="grid">
       <div class="card">
         <h2>WAN</h2>
@@ -31,19 +46,14 @@
         <a class="btn" href="/lan">Apri LAN</a>
       </div>
       <div class="card">
-        <h2>Impostazioni</h2>
-        <p class="muted">Cambia la porta web (default 8080) e altre preferenze.</p>
-        <a class="btn" href="/settings">Apri Impostazioni</a>
-      </div>
-      <div class="card">
-        <h2>SmokePing</h2>
-        <p class="muted">Grafici di latenza e perdita pacchetti.</p>
-        <a class="btn" href="/smokeping/">Apri SmokePing</a>
-      </div>
-      <div class="card">
         <h2>SmokePing Admin</h2>
         <p class="muted">Aggiungi/rimuovi target, cambia probe, riavvia servizio.</p>
         <a class="btn" href="/sp-admin">Apri SP&nbsp;Admin</a>
+      </div>
+      <div class="card">
+        <h2>Impostazioni Aggiuntive</h2>
+        <p class="muted">Cambia la porta web (default 8080) e altre preferenze.</p>
+        <a class="btn" href="/settings">Apri Impostazioni Aggiuntive</a>
       </div>
     </div>
 

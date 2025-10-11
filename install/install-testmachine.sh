@@ -12,20 +12,19 @@ step(){ echo -e "\n== $* =="; }
 APP_DIR=/opt/netprobe
 APP_USER=netprobe
 APP_GROUP=netprobe
-API_PORT=9000         # uvicorn
-WEB_PORT=${WEB_PORT:-8080}  # Apache (puoi esportare WEB_PORT=xxxx prima di lanciare)
+API_PORT=9000                         # uvicorn
+WEB_PORT=${WEB_PORT:-8080}            # Apache (puoi esportare WEB_PORT=xxxx prima di lanciare)
 
 # --- pacchetti base ---
 step "APT update & install"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-  git ca-certificates curl sudo \
+  git ca-certificates curl sudo jq \
   python3 python3-venv python3-pip \
   apache2 apache2-utils \
   smokeping fping \
-  network-manager \
-  jq
+  network-manager
 
 # --- utente/gruppo app ---
 step "Utente/gruppo ${APP_USER}"
@@ -108,17 +107,22 @@ cat >/etc/apache2/sites-available/testmachine.conf <<EOF
 EOF
 a2ensite testmachine.conf >/dev/null || true
 
-# --- SmokePing: attiva conf Apache e permessi ---
+# --- SmokePing: conf Apache e permessi ---
 step "SmokePing: conf Apache + permessi"
 a2enconf smokeping >/dev/null || true
 
-# Gruppo netprobe può scrivere in config.d e leggere RRD
+# gruppi/permessi: CGI (www-data) e demone (smokeping) devono poter leggere/scrivere
 usermod -aG "${APP_GROUP}" smokeping || true
+usermod -aG "${APP_GROUP}" www-data  || true
+
 install -d -m 2770 -o root -g "${APP_GROUP}" /etc/smokeping/config.d
-chgrp -R "${APP_GROUP}" /etc/smokeping/config.d
+chown -R root:"${APP_GROUP}" /etc/smokeping/config.d
 chmod 0660 /etc/smokeping/config.d/* 2>/dev/null || true
 
-# Targets di default (vuoti ma validi) se non esiste
+chown -R smokeping:"${APP_GROUP}" /var/lib/smokeping
+chmod 2770 /var/lib/smokeping
+
+# Targets default (vuoti ma validi)
 if [[ ! -s /etc/smokeping/config.d/Targets ]]; then
   cat >/etc/smokeping/config.d/Targets <<'EOF'
 + TestMachine
@@ -126,33 +130,40 @@ menu = TestMachine
 title = TestMachine targets
 # Aggiungi host da UI
 EOF
-  chown netprobe:netprobe /etc/smokeping/config.d/Targets
+  chown ${APP_USER}:${APP_GROUP} /etc/smokeping/config.d/Targets
   chmod 0660 /etc/smokeping/config.d/Targets
 fi
 
-# --- SUDOERS per l'app (porta, reload, NTP/timezone) ---
+# --- SUDOERS: nmcli + NTP + Apache/Smokeping + install ---
 step "Sudoers per netprobe"
-cat >/etc/sudoers.d/netprobe <<'EOF'
+cat >/etc/sudoers.d/netprobe-ops <<'EOF'
 Defaults:netprobe !requiretty
 
+# Copie file generate dalla webapp (porta, vhost, timesyncd)
 Cmnd_Alias NP_COPY = \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/ports.conf, \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/sites-available/testmachine.conf, \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/systemd/timesyncd.conf
 
+# Reload/restart servizi usati dalla webapp
 Cmnd_Alias NP_SVC = \
-  /usr/bin/systemctl reload apache2, /bin/systemctl reload apache2, \
-  /usr/bin/systemctl restart apache2, /bin/systemctl restart apache2, \
-  /usr/bin/systemctl reload smokeping, /bin/systemctl reload smokeping
+  /bin/systemctl reload apache2, /usr/bin/systemctl reload apache2, \
+  /bin/systemctl restart apache2, /usr/bin/systemctl restart apache2, \
+  /bin/systemctl reload smokeping, /usr/bin/systemctl reload smokeping, \
+  /bin/systemctl try-reload-or-restart systemd-timesyncd, /usr/bin/systemctl try-reload-or-restart systemd-timesyncd
 
+# NTP / timezone
 Cmnd_Alias NP_TIME = \
-  /usr/bin/timedatectl *, /bin/timedatectl *, \
-  /usr/bin/systemctl restart systemd-timesyncd, /bin/systemctl restart systemd-timesyncd, \
-  /usr/bin/systemctl try-reload-or-restart systemd-timesyncd, /bin/systemctl try-reload-or-restart systemd-timesyncd
+  /usr/bin/timedatectl set-ntp *, \
+  /usr/bin/timedatectl set-timezone *
 
-netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME
+# NetworkManager (WAN/LAN)
+Cmnd_Alias NP_NM = \
+  /usr/bin/nmcli *
+
+netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM
 EOF
-chmod 440 /etc/sudoers.d/netprobe
+chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -c
 
 # --- Workdir temporaneo dell’app ---
@@ -160,7 +171,7 @@ step "Workdir temporaneo dell’app"
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe /var/lib/netprobe/tmp
 
 # --- Utenti/app default ---
-step "Seed /etc/netprobe/users.json (admin/admin, sicuro per idempotenza)"
+step "Seed /etc/netprobe/users.json (admin/admin)"
 install -d -m 0770 -o root -g "${APP_GROUP}" /etc/netprobe
 if [[ ! -s /etc/netprobe/users.json ]]; then
 python3 - <<'PY'

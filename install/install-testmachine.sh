@@ -1,229 +1,190 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 LOG=/var/log/testmachine-install.log
-mkdir -p "$(dirname "$LOG")"
 exec > >(tee -a "$LOG") 2>&1
+exec 2>&1
 
-echo "=== TestMachine installer avviato: $(date -Is) ==="
+step(){ echo -e "\n== $* =="; }
 
-# ---- Parametri modificabili via env -----------------------------------------
-REPO_URL="${REPO_URL:-https://github.com/fraidotube/testmachine.git}"
-BRANCH="${BRANCH:-main}"
-CONFIGURE_WAN="${CONFIGURE_WAN:-1}"
+[[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Lancia come root"; exit 1; }
 
-APP_DIR="/opt/netprobe"
-APP_APPDIR="$APP_DIR/app"
-VENV_DIR="$APP_DIR/venv"
+APP_DIR=/opt/netprobe
+APP_USER=netprobe
+APP_GROUP=netprobe
+API_PORT=9000         # uvicorn
+WEB_PORT=${WEB_PORT:-8080}  # Apache (puoi esportare WEB_PORT=xxxx prima di lanciare)
 
-SYSTEM_USER="netprobe"
-SYSTEM_GROUP="netprobe"
+# --- pacchetti base ---
+step "APT update & install"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends \
+  git ca-certificates curl sudo \
+  python3 python3-venv python3-pip \
+  apache2 apache2-utils \
+  smokeping fping \
+  network-manager \
+  jq
 
-# ---- Funzioni utili ---------------------------------------------------------
-need_root() {
-  if [ "$(id -u)" -ne 0 ]; then
-    echo "Esegui come root (sudo -i)."
-    exit 1
-  fi
-}
+# --- utente/gruppo app ---
+step "Utente/gruppo ${APP_USER}"
+getent group  "${APP_GROUP}" >/dev/null || groupadd -r "${APP_GROUP}"
+id -u "${APP_USER}" >/dev/null 2>&1 || useradd -r -g "${APP_GROUP}" -d "${APP_DIR}" -s /usr/sbin/nologin "${APP_USER}"
 
-apt_install() {
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends "$@"
-}
+# --- sorgenti applicazione ---
+step "Sorgenti applicazione in ${APP_DIR}"
+install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" "${APP_DIR}"
+if [[ ! -d "${APP_DIR}/.git" ]]; then
+  git clone https://github.com/fraidotube/testmachine.git "${APP_DIR}"
+else
+  pushd "${APP_DIR}" >/dev/null
+  sudo -u "${APP_USER}" -H git fetch --all || true
+  sudo -u "${APP_USER}" -H git pull --ff-only || true
+  popd >/dev/null
+fi
 
-ensure_user_group() {
-  getent group  "$SYSTEM_GROUP" >/dev/null || groupadd --system "$SYSTEM_GROUP"
-  getent passwd "$SYSTEM_USER"  >/dev/null || useradd  --system -g "$SYSTEM_GROUP" -d "$APP_DIR" -s /usr/sbin/nologin "$SYSTEM_USER"
-}
+# --- venv + deps ---
+step "Python venv"
+install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" "${APP_DIR}/venv"
+python3 -m venv "${APP_DIR}/venv"
+"${APP_DIR}/venv/bin/pip" install --upgrade pip
+if [[ -f "${APP_DIR}/requirements.txt" ]]; then
+  "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
+else
+  "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart
+fi
+chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
 
-list_phys_ifaces() {
-  # 1) nmcli se presente
-  if command -v nmcli >/dev/null 2>&1; then
-    nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null \
-    | awk -F: '($2=="ethernet" || $2=="wifi") && $1!="lo"{print $1}'
-    return 0
-  fi
-  # 2) fallback: ip link
-  ip -o link show | awk -F': ' '$2!="lo"{print $2}' | cut -d'@' -f1
-}
-
-ensure_dirs_and_creds() {
-  mkdir -p /etc/netprobe
-  chown root:"$SYSTEM_GROUP" /etc/netprobe
-  chmod 0770 /etc/netprobe
-
-  # users.json iniziale (admin/admin) se assente
-  if [ ! -f /etc/netprobe/users.json ]; then
-    python3 - <<'PY'
-import json, os, secrets, hashlib, pathlib
-p=pathlib.Path("/etc/netprobe/users.json")
-p.parent.mkdir(parents=True, exist_ok=True)
-def pbk(password,salt,rounds=260000): return hashlib.pbkdf2_hmac("sha256",password.encode(),bytes.fromhex(salt),rounds).hex()
-def h(pw): s=secrets.token_hex(16); r=260000; return f"pbkdf2_sha256${r}${s}${pbk(pw,s,r)}"
-data={"users":{"admin":{"pw":h("admin"),"roles":["admin"]}}}
-tmp=p.with_suffix(".tmp")
-with open(tmp,"w") as f: json.dump(data,f,indent=2)
-os.replace(tmp,p)
-PY
-    chown root:"$SYSTEM_GROUP" /etc/netprobe/users.json
-    chmod 0660 /etc/netprobe/users.json
-  fi
-
-  # session.key (leggibile dal gruppo)
-  if [ ! -f /etc/netprobe/session.key ]; then
-    head -c 32 /dev/urandom >/etc/netprobe/session.key
-    chown root:"$SYSTEM_GROUP" /etc/netprobe/session.key
-    chmod 0640 /etc/netprobe/session.key
-  fi
-}
-
-install_packages() {
-  apt_install ca-certificates curl git sudo \
-              python3 python3-venv python3-pip \
-              apache2 \
-              network-manager \
-              smokeping fping
-  systemctl enable --now NetworkManager || true
-}
-
-deploy_repo_and_venv() {
-  if [ -d "$APP_DIR/.git" ]; then
-    echo "[GIT] Repo esistente, aggiornamento..."
-    sudo -u "$SYSTEM_USER" -H bash -lc "cd '$APP_DIR' && git fetch --all && git checkout '$BRANCH' && git pull --ff-only"
-  else
-    echo "[GIT] Clono $REPO_URL in $APP_DIR"
-    git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
-    chown -R "$SYSTEM_USER:$SYSTEM_GROUP" "$APP_DIR"
-  fi
-
-  if [ ! -d "$VENV_DIR" ]; then
-    python3 -m venv "$VENV_DIR"
-    chown -R "$SYSTEM_USER:$SYSTEM_GROUP" "$VENV_DIR"
-  fi
-
-  "$VENV_DIR/bin/pip" install -U pip wheel
-  "$VENV_DIR/bin/pip" install fastapi "uvicorn[standard]" jinja2 python-multipart
-}
-
-install_systemd_service() {
-  cat >/etc/systemd/system/netprobe-api.service <<'EOF'
+# --- Systemd: API ---
+step "Systemd unit netprobe-api"
+cat >/etc/systemd/system/netprobe-api.service <<EOF
 [Unit]
 Description=TestMachine API (FastAPI)
 After=network.target
 
 [Service]
-User=netprobe
-Group=netprobe
-WorkingDirectory=/opt/netprobe/app
+User=${APP_USER}
+Group=${APP_GROUP}
+WorkingDirectory=${APP_DIR}/app
+ExecStart=${APP_DIR}/venv/bin/uvicorn main:app --host 127.0.0.1 --port ${API_PORT}
+Restart=on-failure
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/netprobe/venv/bin/uvicorn main:app --host 127.0.0.1 --port 9000
-Restart=always
-RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  systemctl enable --now netprobe-api
-}
+systemctl daemon-reload
+systemctl enable --now netprobe-api
 
-configure_apache() {
-  # Abilita ascolto su 8080 se mancante
-  if ! grep -qE '^\s*Listen\s+8080' /etc/apache2/ports.conf; then
-    echo "Listen 8080" >> /etc/apache2/ports.conf
-  fi
-  a2enmod proxy proxy_http headers >/dev/null
+# --- Apache: moduli + porta + vhost ---
+step "Apache moduli"
+a2enmod proxy proxy_http headers rewrite cgid >/dev/null
 
-  cat >/etc/apache2/sites-available/testmachine.conf <<'EOF'
-<VirtualHost *:8080>
-  ServerName testmachine.local
+step "Apache porta ${WEB_PORT}"
+sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
+grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || \
+  echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 
+step "Site testmachine.conf"
+cat >/etc/apache2/sites-available/testmachine.conf <<EOF
+<VirtualHost *:${WEB_PORT}>
+  ServerName testmachine
+  ErrorLog  \${APACHE_LOG_DIR}/testmachine-error.log
+  CustomLog \${APACHE_LOG_DIR}/testmachine-access.log combined
+
+  # Reverse proxy verso FastAPI
   ProxyPreserveHost On
   RequestHeader set X-Forwarded-Proto "http"
+  ProxyPass        / http://127.0.0.1:${API_PORT}/
+  ProxyPassReverse / http://127.0.0.1:${API_PORT}/
 
-  ProxyPass        / http://127.0.0.1:9000/
-  ProxyPassReverse / http://127.0.0.1:9000/
-
-  ErrorLog ${APACHE_LOG_DIR}/testmachine-error.log
-  CustomLog ${APACHE_LOG_DIR}/testmachine-access.log combined
+  # Esclusione SmokePing dal proxy: usa la sua conf di Apache
+  <Location /smokeping/>
+    ProxyPass !
+    Require all granted
+  </Location>
 </VirtualHost>
 EOF
+a2ensite testmachine.conf >/dev/null || true
 
-  a2ensite testmachine.conf >/dev/null
-  systemctl reload apache2
-}
+# --- SmokePing: attiva conf Apache e permessi ---
+step "SmokePing: conf Apache + permessi"
+a2enconf smokeping >/dev/null || true
 
-configure_smokeping() {
-  # Targets vuoti con blocco gestito
-  TGT=/etc/smokeping/config.d/Targets
-  if [ ! -f "$TGT" ]; then
-    cat >"$TGT" <<'EOF'
-*** Targets ***
+# Gruppo netprobe può scrivere in config.d e leggere RRD
+usermod -aG "${APP_GROUP}" smokeping || true
+install -d -m 2770 -o root -g "${APP_GROUP}" /etc/smokeping/config.d
+chgrp -R "${APP_GROUP}" /etc/smokeping/config.d
+chmod 0660 /etc/smokeping/config.d/* 2>/dev/null || true
 
-# BEGIN_TM_MANAGED
+# Targets di default (vuoti ma validi) se non esiste
+if [[ ! -s /etc/smokeping/config.d/Targets ]]; then
+  cat >/etc/smokeping/config.d/Targets <<'EOF'
 + TestMachine
 menu = TestMachine
-title = Hosts gestiti da TestMachine
-
-# END_TM_MANAGED
+title = TestMachine targets
+# Aggiungi host da UI
 EOF
-  fi
-  mkdir -p /var/lib/smokeping/TestMachine
-  chown -R smokeping:smokeping /var/lib/smokeping/TestMachine || true
-  /usr/sbin/smokeping --check || true
-  systemctl reload smokeping || true
-}
+  chown netprobe:netprobe /etc/smokeping/config.d/Targets
+  chmod 0660 /etc/smokeping/config.d/Targets
+fi
 
-configure_sudoers() {
-  S=/etc/sudoers.d/testmachine
-  cat >"$S" <<'EOF'
+# --- SUDOERS per l'app (porta, reload, NTP/timezone) ---
+step "Sudoers per netprobe"
+cat >/etc/sudoers.d/netprobe <<'EOF'
 Defaults:netprobe !requiretty
-netprobe ALL=(root) NOPASSWD: /bin/systemctl reload smokeping, /bin/systemctl restart smokeping, /usr/bin/nmcli *, /usr/bin/install *
+
+Cmnd_Alias NP_COPY = \
+  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/ports.conf, \
+  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/sites-available/testmachine.conf, \
+  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/systemd/timesyncd.conf
+
+Cmnd_Alias NP_SVC = \
+  /usr/bin/systemctl reload apache2, /bin/systemctl reload apache2, \
+  /usr/bin/systemctl restart apache2, /bin/systemctl restart apache2, \
+  /usr/bin/systemctl reload smokeping, /bin/systemctl reload smokeping
+
+Cmnd_Alias NP_TIME = \
+  /usr/bin/timedatectl *, /bin/timedatectl *, \
+  /usr/bin/systemctl restart systemd-timesyncd, /bin/systemctl restart systemd-timesyncd, \
+  /usr/bin/systemctl try-reload-or-restart systemd-timesyncd, /bin/systemctl try-reload-or-restart systemd-timesyncd
+
+netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME
 EOF
-  chmod 0440 "$S"
-  visudo -cf "$S"
-}
+chmod 440 /etc/sudoers.d/netprobe
+visudo -c
 
-configure_wan_dhcp() {
-  [ "$CONFIGURE_WAN" = "1" ] || { echo "CONFIGURE_WAN=0 → salto config WAN"; return; }
+# --- Workdir temporaneo dell’app ---
+step "Workdir temporaneo dell’app"
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe /var/lib/netprobe/tmp
 
-  IFACE="$(list_phys_ifaces | head -n1 || true)"
-  if [ -z "${IFACE:-}" ]; then
-    echo "Nessuna interfaccia fisica trovata, salto configurazione WAN."
-    return
-  fi
+# --- Utenti/app default ---
+step "Seed /etc/netprobe/users.json (admin/admin, sicuro per idempotenza)"
+install -d -m 0770 -o root -g "${APP_GROUP}" /etc/netprobe
+if [[ ! -s /etc/netprobe/users.json ]]; then
+python3 - <<'PY'
+import json, secrets, hashlib, pathlib, os
+def pbk(pw,s,r=260000): return hashlib.pbkdf2_hmac("sha256",pw.encode(),bytes.fromhex(s),r).hex()
+def h(p): s=secrets.token_hex(16); r=260000; return f"pbkdf2_sha256${r}${s}${pbk(p,s,r)}"
+p=pathlib.Path("/etc/netprobe/users.json")
+p.write_text(json.dumps({"users":{"admin":{"pw":h("admin"),"roles":["admin"]}}},indent=2))
+os.chmod(p,0o660)
+PY
+  chgrp "${APP_GROUP}" /etc/netprobe/users.json
+fi
 
-  echo "Configuro WAN DHCP su: $IFACE"
-  nmcli dev disconnect "$IFACE" >/dev/null 2>&1 || true
-  nmcli con del "wan0" >/dev/null 2>&1 || true
-  # crea connessione ethernet DHCP
-  nmcli con add type ethernet ifname "$IFACE" con-name "wan0" ipv4.method auto ipv6.method ignore >/dev/null
-  nmcli con mod "wan0" ipv4.dns "1.1.1.1 8.8.8.8" ipv4.ignore-auto-dns yes >/dev/null
-  nmcli con up "wan0" || nmcli dev connect "$IFACE" || true
-}
+# --- servizi ---
+step "Riavvio servizi"
+systemctl restart smokeping || true
+systemctl reload apache2 || systemctl restart apache2
 
-final_report() {
-  echo
-  echo "=== Installazione completata ==="
-  echo " - Log: $LOG"
-  echo " - Web UI: http://$(hostname -I 2>/dev/null | awk '{print $1}'):8080/"
-  echo " - Login iniziale: admin / admin"
-  echo
-}
+# --- check ---
+step "Check finali"
+systemctl is-active --quiet netprobe-api && echo "API OK"
+systemctl is-active --quiet smokeping && echo "SmokePing OK"
+apachectl -t || true
+echo -n "HTTP / (via :${WEB_PORT}): "; curl -sI "http://127.0.0.1:${WEB_PORT}/" | head -n1 || true
+echo -n "HTTP /smokeping/ (via Apache): "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping/" | head -n1 || true
 
-# ---- Esecuzione -------------------------------------------------------------
-need_root
-install_packages
-ensure_user_group
-ensure_dirs_and_creds
-deploy_repo_and_venv
-install_systemd_service
-configure_apache
-configure_smokeping
-configure_sudoers
-configure_wan_dhcp
-final_report
-
-exit 0
+echo -e "\nFATTO. Log: ${LOG}"

@@ -1,0 +1,32 @@
+*** Targets ***
+
+probe = FPing
+
+menu = Top
+title = Network Latency Grapher
+remark = Welcome to the SmokePing website of xxx Company. \
+         Here you will learn all about the latency of our network.
+
++ Local
+
+menu = Local
+title = Local Network
+#parents = owner:/Test/James location:/
+
+++ LocalMachine
+
+menu = Local Machine
+title = This host
+host = localhost
+#alerts = someloss
+
+# BEGIN TM_MANAGED
++ TestMachine
+menu = TestMachine
+title = Hosts gestiti da TestMachine
+
+++ host1
+menu = Host1
+title = Host1
+host = 192.168.100.200
+# END TM_MANAGED

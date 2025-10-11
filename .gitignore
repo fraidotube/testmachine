@@ -24,3 +24,8 @@ var/
 
 # Node (se mai presente)
 node_modules/
+
+# Backup/temporanei
+*.bak.*
+*.swp
+*.tmp

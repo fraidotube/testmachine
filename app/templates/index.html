@@ -15,7 +15,13 @@
         <img src="/static/img/logo.svg" alt="Logo" class="logo">
       </div>
       <div class="title-center">TestMachine</div>
-      <div class="spacer"></div>
+      <div class="spacer">
+        {% if user %}
+          <a href="/auth/logout?next=/">Logout</a>
+        {% else %}
+          <a href="/auth/login">Login</a>
+        {% endif %}
+      </div>
     </div>
 
     <!-- SEZIONE: STRUMENTI -->
@@ -56,6 +62,20 @@
         <p class="muted">Gestisci utenti, ruoli e password.</p>
         <a class="btn" href="/auth/users">Apri gestione utenti</a>
       </div>
+
+      {% if user %}
+      <div class="card">
+        <h2>Sessione</h2>
+        <p class="muted">Utente corrente: <b>{{ user }}</b>.</p>
+        <a class="btn" href="/auth/logout?next=/">Logout</a>
+      </div>
+      {% else %}
+      <div class="card">
+        <h2>Accesso</h2>
+        <p class="muted">Accedi per usare gli strumenti protetti.</p>
+        <a class="btn" href="/auth/login">Vai al login</a>
+      </div>
+      {% endif %}
     </div>
 
     <div class="footer">© TestMachine – Debian 12</div>

@@ -11,8 +11,8 @@ KEY_FILE     = Path("/etc/netprobe/session.key")
 COOKIE_NAME  = "np_session"
 SESSION_MAX_AGE = 7 * 24 * 3600  # 7 giorni
 
-# Ruoli disponibili (per ora 1 solo, ma estendibile)
-ROLES = ["admin"]
+# Ruoli disponibili (minimo utile)
+ROLES = ["admin", "operator", "viewer"]
 
 _username_re = re.compile(r"^[a-zA-Z0-9_.-]{1,32}$")
 

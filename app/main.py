@@ -9,7 +9,7 @@ from routes.lan import router as lan_router
 from routes.settings import router as settings_router
 
 # Auth
-from routes.auth import router as auth_router, verify_session_cookie
+from routes.auth import router as auth_router, verify_session_cookie, _load_users  # _load_users per leggere i ruoli
 
 app = FastAPI()
 
@@ -17,36 +17,73 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory="/opt/netprobe/app/static"), name="static")
 templates = Jinja2Templates(directory="/opt/netprobe/app/templates")
 
-# --------- middleware di protezione ---------
-PROTECTED_PREFIXES = ("/wan", "/lan", "/settings", "/sp-admin")
-ALLOW_PREFIXES = ("/auth", "/static", "/smokeping")  # sempre liberi
+# --------- RBAC: prefisso -> ruoli ammessi ----------
+PATH_ROLES = {
+    "/sp-admin": ["admin"],                    # pannello SmokePing admin
+    "/settings": ["admin"],                    # impostazioni aggiuntive
+    "/wan":      ["admin", "operator"],        # config rete WAN
+    "/lan":      ["admin", "operator"],        # config rete LAN
+    "/smokeping":["admin", "operator", "viewer"],  # fruizione grafici
+    "/auth":     ["admin"],                    # gestione utenti/ruoli
+}
+
+# Percorsi sempre liberi
+ALLOW_PREFIXES = ("/static", "/auth/login", "/auth/logout", "/favicon.ico")
 
 @app.middleware("http")
 async def auth_gatekeeper(request: Request, call_next):
     path = request.url.path or "/"
-    # liberi
-    if path == "/" or path == "/favicon.ico":
+
+    # homepage sempre libera
+    if path == "/":
         return await call_next(request)
+
+    # liberi
     if any(path.startswith(p) for p in ALLOW_PREFIXES):
         return await call_next(request)
-    # protetti
-    if any(path.startswith(p) for p in PROTECTED_PREFIXES):
-        user = verify_session_cookie(request)
-        if not user:
-            return RedirectResponse(url=f"/auth/login?next={path}", status_code=307)
-        request.state.user = user
+
+    # trova eventuale prefisso protetto
+    protected = None
+    for prefix in PATH_ROLES:
+        if path.startswith(prefix):
+            protected = prefix
+            break
+
+    if not protected:
+        # non mappato: lascia passare (oppure metti default=login)
+        return await call_next(request)
+
+    # richiede login
+    user = verify_session_cookie(request)
+    if not user:
+        return RedirectResponse(url=f"/auth/login?next={path}", status_code=307)
+
+    # verifica ruolo
+    users = _load_users()
+    roles = (users.get(user, {}) or {}).get("roles", []) or []
+    allowed = PATH_ROLES.get(protected, [])
+    if not any(r in allowed for r in roles):
+        return HTMLResponse("<h3 style='margin:2rem'>Accesso negato</h3>", status_code=403)
+
+    request.state.user = user
     return await call_next(request)
 
 # --------- routes base ---------
 @app.get("/", response_class=HTMLResponse)
+
 def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    from routes.auth import verify_session_cookie
+    # mostra il link Logout se c'è una sessione valida
+    user = verify_session_cookie(request)
+    return templates.TemplateResponse("index.html", {"request": request, "user": user})
+
+
 
 # Registra i router
 app.include_router(wan_router, prefix="/wan")
 app.include_router(lan_router, prefix="/lan")
 app.include_router(settings_router, prefix="/settings")
-app.include_router(auth_router)  # NEW
+app.include_router(auth_router)
 
 # (Opzionale) pannello admin Smokeping
 try:

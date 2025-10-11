@@ -14,8 +14,6 @@
         <a href="/wan">WAN</a>
         <a href="/lan">LAN</a>
         <a href="/settings">Impostazioni</a>
-        <a href="/smokeping/">Smokeping</a>
-        <a href="/sp-admin">SP&nbsp;Admin</a>
       </div>
     </div>
 
@@ -34,16 +32,6 @@
         <h2>Impostazioni</h2>
         <p class="muted">Cambia la porta web (default 8080) e altre preferenze.</p>
         <a class="btn" href="/settings">Apri Impostazioni</a>
-      </div>
-      <div class="card">
-        <h2>SmokePing</h2>
-        <p class="muted">Grafici di latenza e perdita pacchetti.</p>
-        <a class="btn" href="/smokeping/">Apri SmokePing</a>
-      </div>
-      <div class="card">
-        <h2>SmokePing Admin</h2>
-        <p class="muted">Aggiungi/rimuovi target, cambia probe, riavvia servizio.</p>
-        <a class="btn" href="/sp-admin">Apri SP&nbsp;Admin</a>
       </div>
     </div>
 

@@ -10,7 +10,7 @@ def head(title:str)->str:
     <meta name='viewport' content='width=device-width,initial-scale=1'/>
     <title>{title}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>
     <div class='container'><div class='nav'><div class='brand'><img src='/static/img/CNS-21-LOGO-BIANCO.svg' alt='Logo' class='logo'/><span>TestMachine</span></div>
-    <div class='links'><a href='/'>Home</a><a href='/wan'>WAN</a><a href='/lan'>LAN</a><a href='/settings'>Impostazioni</a><a href='/smokeping/'>Smokeping</a><a href='/sp-admin'>SP&nbsp;Admin</a></div></div>"""
+    <div class='links'><a href='/smokeping/smokeping.cgi'>Smokeping</a><a href='/'>Home</a><a href='/wan'>WAN</a><a href='/lan'>LAN</a></div></div>"""
 
 def _self_ip() -> str:
     rc, out, _ = run(["/usr/sbin/ip","route","get","1.1.1.1"])
@@ -44,7 +44,7 @@ def settings_home(request: Request):
         <button class='btn' type='submit'>Applica</button>
       </form>
       <p class='notice'>Dopo il cambio porta verrai reindirizzato automaticamente.</p>
-    <a href='/smokeping/'>Smokeping</a></div></div></div></body></html>"""
+    </div></div></div></body></html>"""
 
 def _apply_port_change(tmp_ports, tmp_vhost, bak_ports, bak_vhost):
     import time
@@ -120,7 +120,7 @@ Listen {port}
       <h2 class='ok'>Porta impostata a {port}</h2>
       <p>Riavvio di Apache in corso. Verrai reindirizzato automaticamente.</p>
       <p>Se non succede, clicca: <a class='btn' href="{target}">{target}</a></p>
-    <a href='/smokeping/'>Smokeping</a></div></div></div>
+    </div></div></div>
     <meta http-equiv="refresh" content="3; url={target}">
     <script>setTimeout(function(){{ location.replace("{target}"); }}, 3000);</script>
     </body></html>"""

@@ -9,7 +9,7 @@ def head(title:str)->str:
     <meta name='viewport' content='width=device-width,initial-scale=1'/>
     <title>{title}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>
     <div class='container'><div class='nav'><div class='brand'><img src='/static/img/CNS-21-LOGO-BIANCO.svg' alt='Logo' class='logo'/><span>TestMachine</span></div>
-    <div class='links'><a href='/'>Home</a><a href='/wan'>WAN</a><a href='/lan'>LAN</a><a href='/settings'>Impostazioni</a><a href='/smokeping/'>Smokeping</a><a href='/sp-admin'>SP&nbsp;Admin</a></div></div>"""
+    <div class='links'><a href='/smokeping/smokeping.cgi'>Smokeping</a><a href='/'>Home</a><a href='/lan'>LAN</a><a href='/settings'>Impostazioni</a></div></div>"""
 
 def list_ifaces():
     # prova nmcli
@@ -64,7 +64,7 @@ def page(request: Request):
         <button class='btn' type='submit'>Applica WAN</button>
       </form>
       <p class='notice'>Suggerimento: se l'elenco è vuoto, verifica che nmcli/ip siano installati.</p>
-    <a href='/smokeping/'>Smokeping</a></div></div></div></body></html>"""
+    </div></div></div></body></html>"""
 
 @router.post("/set")
 def set_wan(mode: str = Form(...), ifname: str = Form(...), ip: str = Form(None), prefix: int = Form(None),
@@ -87,4 +87,4 @@ def set_wan(mode: str = Form(...), ifname: str = Form(...), ip: str = Form(None)
     if rc != 0:
         return JSONResponse({"status":"error","out":out,"err":err}, status_code=500)
     run(["sudo","-n","nmcli","con","up","wan0"])
-    return HTMLResponse(head("WAN") + "<div class='grid'><div class='card'><h2 class='ok'>WAN aggiornata</h2><a class='btn secondary' href='/wan'>Indietro</a><a href='/smokeping/'>Smokeping</a></div></div></div></body></html>")
+    return HTMLResponse(head("WAN") + "<div class='grid'><div class='card'><h2 class='ok'>WAN aggiornata</h2><a class='btn secondary' href='/wan'>Indietro</a></div></div></div></body></html>")

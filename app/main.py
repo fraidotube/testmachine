@@ -1,23 +1,32 @@
-import os
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from jinja2 import Environment, FileSystemLoader
+from fastapi.templating import Jinja2Templates
 
-from routes.settings import router as settings_router
+# Routers principali
 from routes.wan import router as wan_router
 from routes.lan import router as lan_router
+from routes.settings import router as settings_router
 
 app = FastAPI()
-BASE_DIR = os.path.dirname(__file__)
-templates = Environment(loader=FileSystemLoader(os.path.join(BASE_DIR, 'templates')))
-app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, 'static')), name="static")
+
+# Static e templates (percorsi assoluti per evitare problemi di cwd)
+app.mount("/static", StaticFiles(directory="/opt/netprobe/app/static"), name="static")
+templates = Jinja2Templates(directory="/opt/netprobe/app/templates")
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    tpl = templates.get_template('index.html')
-    return tpl.render()
+    return templates.TemplateResponse("index.html", {"request": request})
 
-app.include_router(settings_router, prefix="/settings")
+# Registra i router
 app.include_router(wan_router, prefix="/wan")
 app.include_router(lan_router, prefix="/lan")
+app.include_router(settings_router, prefix="/settings")
+
+# (Opzionale) pannello admin Smokeping: non deve rompere se non esiste
+try:
+    from routes.sp_admin import router as sp_admin_router  # type: ignore
+    app.include_router(sp_admin_router, prefix="/sp-admin")
+except Exception:
+    # niente admin, ma l app deve comunque avviarsi
+    pass

@@ -8,18 +8,14 @@
 </head>
 <body>
   <div class="container">
-    <!-- NAV (home con tutte le scorciatoie) -->
+
+    <!-- NAV semplificata: logo a sinistra, titolo grande centrato -->
     <div class="nav">
       <div class="brand">
-        <img src="/static/img/logo.svg" alt="Logo" class="logo"><span>TestMachine</span>
+        <img src="/static/img/logo.svg" alt="Logo" class="logo">
       </div>
-      <div class="links">
-        <a href="/wan">WAN</a>
-        <a href="/lan">LAN</a>
-        <a href="/settings">Impostazioni</a>
-        <a href="/smokeping/">Smokeping</a>
-        <a href="/sp-admin">SP&nbsp;Admin</a>
-      </div>
+      <div class="title-center">TestMachine</div>
+      <div class="spacer"></div>
     </div>
 
     <!-- SEZIONE: STRUMENTI -->
@@ -54,6 +50,11 @@
         <h2>Impostazioni Aggiuntive</h2>
         <p class="muted">Cambia la porta web (default 8080) e altre preferenze.</p>
         <a class="btn" href="/settings">Apri Impostazioni Aggiuntive</a>
+      </div>
+      <div class="card">
+        <h2>Utenti &amp; accesso</h2>
+        <p class="muted">Gestisci utenti, ruoli e password.</p>
+        <a class="btn" href="/auth/users">Apri gestione utenti</a>
       </div>
     </div>
 

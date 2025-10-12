@@ -1,342 +1,338 @@
-TestMachine
-===========
+# TestMachine
 
 Appliance di diagnostica di rete per Debian:
 
--   **Web UI** (FastAPI dietro Apache)
+- **Web UI** (FastAPI dietro Apache)  
+- **SmokePing** per latenza  
+- **Packet Capture (PCAP)**: avvio/stop, download, analisi rapida (protocol hierarchy, endpoints, conversations, DNS/HTTP/SNI, top porte)  
+- Cattura **non-root** tramite capability su `dumpcap`  
+- Pagine **Impostazioni Sniffer** (quota, durata massima, policy)
 
--   **SmokePing** per latenza
-
--   **Packet Capture (PCAP)**: avvio/stop, download, analisi rapida (protocol hierarchy, endpoints, conversations, DNS/HTTP/SNI, top porte)
-
--   Cattura **non-root** tramite capability su `dumpcap`
-
--   Pagine **Impostazioni Sniffer** (quota, durata massima, policy)
-
-> UI predefinita: `http://<IP_SERVER>:8080/`\
+> UI predefinita: `http://<IP_SERVER>:8080/`  
 > Credenziali iniziali: **admin / admin** (cambiale subito).
 
-* * * * *
+---
 
-1) Requisiti
-------------
+## 1) Requisiti
 
--   Debian **12.6** "pulita"
+- Debian **12.6** “pulita”  
+- Accesso root (o sudo)  
+- Rete IPv4 raggiungibile
 
--   Accesso root (o sudo)
+L’installer prepara:
 
--   Rete IPv4 raggiungibile
+- Pacchetti: `apache2`, venv Python con FastAPI/Uvicorn, `smokeping`, `tshark`, `dumpcap`, `tcpdump`, …  
+- Systemd unit `netprobe-api`  
+- VHost Apache su **8080** (modificabile con `WEB_PORT`)  
+- Directory e permessi:
+  - `/opt/netprobe` (app)
+  - `/var/lib/netprobe` (stato)
+  - `/var/lib/netprobe/pcap` (catture)
+  - `/etc/netprobe/users.json` e `/etc/netprobe/pcap.json` (config)
 
-L'installer prepara:
+---
 
--   Pacchetti: `apache2`, venv Python con FastAPI/Uvicorn, `smokeping`, `tshark`, `dumpcap`, `tcpdump`, ...
+## 2) Configurare **a mano** l’IP (senza pacchetti aggiuntivi)
 
--   Systemd unit `netprobe-api`
+Sostituisci i valori con quelli reali (senza le `<>`). Esempio per interfaccia `ens4`, IP `192.168.1.50/24` e gateway `192.168.1.1`:
 
--   VHost Apache su **8080** (modificabile con `WEB_PORT`)
+    IFACE=ens4
+    IP=192.168.1.50/24
+    GW=192.168.1.1
 
--   Directory e permessi:
+Imposta indirizzo, porta l’interfaccia su *up* e aggiungi la route di default:
 
-    -   `/opt/netprobe` (app)
+    ip addr add "$IP" dev "$IFACE"
+    ip link set "$IFACE" up
+    ip route add default via "$GW"
 
-    -   `/var/lib/netprobe` (stato)
+DNS di base (scrive un file `/etc/resolv.conf` semplice):
 
-    -   `/var/lib/netprobe/pcap` (catture)
+    printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
 
-    -   `/etc/netprobe/users.json` e `/etc/netprobe/pcap.json` (config)
-
-* * * * *
-
-2) Configurare **a mano** l'IP (funziona anche senza rete/pacchetti)
---------------------------------------------------------------------
-
-Sostituisci i valori tra `<>`:
-
-`IFACE=<es. ens18>
-IP=192.168.1.50/24
-GW=192.168.1.1
-
-# IP e link up
-ip addr add "$IP" dev "$IFACE"
-ip link set "$IFACE" up
-
-# Default route
-ip route add default via "$GW"
-
-# DNS (scrive un resolv.conf semplice)
-printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf`
-
-> **Nota**: se `/etc/resolv.conf` è un *symlink* (es. a systemd-resolved), puoi forzare un file reale così:
+> **Nota**: se `/etc/resolv.conf` è un *symlink* (p.es. a systemd-resolved), puoi forzare un file reale così:
 >
-> `rm -f /etc/resolv.conf
-> printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf`
+>     rm -f /etc/resolv.conf
+>     printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
 >
-> Verifica:
+> Verifica con:
 >
-> `ping -c1 1.1.1.1
-> ping -c1 google.com`
+>     ping -c1 1.1.1.1
+>     ping -c1 google.com
 
-* * * * *
+---
 
-3) Installazione
-----------------
+## 3) Installazione
 
 Esegui come **root**:
 
-`# (opzionale) porta web diversa da 8080
-export WEB_PORT=8080
-
-# scarica ed esegui l'installer
-curl -fsSL https://raw.githubusercontent.com/<TUO_USER_O_ORG>/testmachine/main/install/install-testmachine.sh | bash`
+    # (opzionale) porta web diversa da 8080
+    export WEB_PORT=8080
+    
+    # scarica ed esegui l'installer
+    curl -fsSL https://raw.githubusercontent.com/<TUO_USER_O_ORG>/testmachine/main/install/install-testmachine.sh | bash
 
 Cosa fa lo script:
 
--   Installa pacchetti
+- Installa pacchetti
+- Crea utente/gruppo `netprobe`
+- Clona/aggiorna il repo in `/opt/netprobe`
+- Crea venv Python + dipendenze
+- Imposta capability su `/usr/bin/dumpcap` (`cap_net_raw,cap_net_admin+eip`)
+- **Seed** config:
+  - `/etc/netprobe/users.json` → `admin/admin`
+  - `/etc/netprobe/pcap.json`:
 
--   Crea utente/gruppo `netprobe`
-
--   Clona/aggiorna il repo in `/opt/netprobe`
-
--   Crea venv Python + dipendenze
-
--   Imposta capability su `/usr/bin/dumpcap` (`cap_net_raw,cap_net_admin+eip`)
-
--   **Seed** config:
-
-    -   `/etc/netprobe/users.json` → `admin/admin`
-
-    -   `/etc/netprobe/pcap.json`:
-
-        `{
+        {
           "duration_max": 3600,
           "quota_gb": 5,
           "policy": "rotate",
           "poll_ms": 1000,
           "allow_bpf": true
-        }`
+        }
 
--   Abilita/avvia servizi:
-
-    -   `netprobe-api` (Uvicorn su 127.0.0.1:9000)
-
-    -   Apache vhost su `:${WEB_PORT}`
-
-    -   SmokePing
+- Abilita/avvia servizi:
+  - `netprobe-api` (Uvicorn su 127.0.0.1:9000)
+  - Apache vhost su `:${WEB_PORT}`
+  - SmokePing
 
 Check rapidi:
 
-`systemctl status netprobe-api --no-pager -n 20
-systemctl status apache2 --no-pager -n 20
-systemctl status smokeping --no-pager -n 20`
+    systemctl status netprobe-api --no-pager -n 20
+    systemctl status apache2 --no-pager -n 20
+    systemctl status smokeping --no-pager -n 20
 
-Apri la UI: `http://<IP_SERVER>:8080/` (o la porta scelta)
+Apri la UI: `http://<IP_SERVER>:8080/` (o la porta scelta).
 
-* * * * *
+---
 
-4) Primo accesso
-----------------
+## 4) Primo accesso
 
--   Utente: **admin**
+- Utente: **admin**  
+- Password: **admin**
 
--   Password: **admin**
+> Cambia subito la password dal menu utenti.
 
-> Cambia la password dal menu utente.
+---
 
-* * * * *
-
-5) Packet Capture (PCAP)
-------------------------
+## 5) Packet Capture (PCAP)
 
 ### Avvio
 
-1.  Vai su **Packet Capture**.
-
-2.  Seleziona **Interfaccia**, **Durata**, **Snaplen**, (opz.) **Filtro BPF**.
-
-3.  **Avvia**.\
-    Durante la cattura vedi **countdown**, **file/size** e un bottone **Stop**.
+1. Vai su **Packet Capture**.  
+2. Seleziona **Interfaccia**, **Durata**, **Snaplen**, (opz.) **Filtro BPF**.  
+3. **Avvia**. Durante la cattura vedi **countdown**, **file/size** e il bottone **Stop**.
 
 ### Snaplen
 
--   Byte massimi **per pacchetto**.
+- Byte massimi **per pacchetto**.  
+- `262144` ≈ pacchetto completo.  
+- Ridurre il valore limita lo spazio ma può troncare i payload.
 
--   `262144` ≈ pacchetto completo.
+### Filtri BPF — esempi
 
--   Ridurre il valore limita lo spazio ma può troncare i payload.
-
-### Filtri BPF --- esempi
-
--   Host: `host 8.8.8.8` --- `src host 192.168.1.10` --- `dst host 1.1.1.1`
-
--   Rete: `net 192.168.1.0/24`
-
--   Porta: `port 53`, `tcp port 443`, `portrange 1000-2000`
-
--   Protocollo: `icmp`, `arp`, `tcp`, `udp`, `vlan`
-
--   Combinazioni: `tcp and port 80 and host 1.2.3.4`
-
--   HTTP/DNS/TLS: `port 80 or port 443`, `port 53`
-
--   Escludere se stesso: `and not host 192.168.1.5`
+- Host: `host 8.8.8.8` — `src host 192.168.1.10` — `dst host 1.1.1.1`  
+- Rete: `net 192.168.1.0/24`  
+- Porta: `port 53`, `tcp port 443`, `portrange 1000-2000`  
+- Protocollo: `icmp`, `arp`, `tcp`, `udp`, `vlan`  
+- Combinazioni: `tcp and port 80 and host 1.2.3.4`  
+- HTTP/DNS/TLS: `port 80 or port 443`, `port 53`  
+- Escludere se stesso: `and not host 192.168.1.5`
 
 > Puoi **disabilitare** i filtri BPF personalizzati in **Impostazioni Sniffer**.
 
 ### Download & Analisi
 
--   **Catture recenti** → *Scarica* (`.pcapng`)
+- **Catture recenti** → _Scarica_ (`.pcapng`)  
+- **Analizza**: mostra  
+  - Overview (packets/bytes/duration)  
+  - Protocol hierarchy  
+  - Top endpoints  
+  - Top conversations  
+  - Top DNS queries, HTTP Host, TLS SNI  
+  - Top porte (TCP/UDP)
 
--   **Analizza**: mostra
+---
 
-    -   Overview (packets/bytes/duration)
+## 6) SmokePing (latenza)
 
-    -   Protocol hierarchy
+### Accesso ai grafici
 
-    -   Top endpoints
+- URL: `http://<IP_SERVER>:8080/smokeping/`  
+- I grafici sono serviti dal modulo **CGI** di Apache già configurato dall’installer.
 
-    -   Top conversations
+### Aggiungere target (metodo consigliato)
 
-    -   Top DNS queries, HTTP Host, TLS SNI
+- Dalla Web UI, se presente la card **SmokePing Admin**: `http://<IP_SERVER>:8080/sp-admin`  
+  - Aggiungi/edita gli host, poi **Salva** → il servizio verrà ricaricato automaticamente.
 
-    -   Top porte (TCP/UDP)
+> Se la pagina `/sp-admin` non è disponibile, usa la modifica manuale (vedi sotto).
 
-* * * * *
+### Aggiungere target (metodo manuale)
 
-6) Impostazioni Sniffer
------------------------
+File principali (Debian):
+
+- `/etc/smokeping/config.d/Probes` – definizione dei probe (usa **FPing** di default)  
+- `/etc/smokeping/config.d/Targets` – elenco host/gerarchie  
+- `/etc/smokeping/config.d/Alerts` – regole di alert (opzionale)
+
+Esempio minimo in **Targets** (FPing):
+
+    + TestMachine
+    menu = TestMachine
+    title = TestMachine targets
+
+    ++ gateway
+    menu = Gateway
+    title = Router di casa
+    host = 192.168.1.1
+
+Salva, poi verifica e ricarica:
+
+    smokeping --check 2>/dev/null || /usr/sbin/smokeping --check
+    systemctl reload smokeping
+
+### Dove finiscono i dati
+
+- RRD in: `/var/lib/smokeping`  
+- Per azzerare i dati di un target, rimuovi le RRD relative (poi reload).
+
+### Permessi & sicurezza
+
+- L’installer imposta permessi/ownership perché **www-data** e **smokeping** possano leggere/scrivere:  
+  - `/etc/smokeping/config.d` (gruppo `netprobe`)  
+  - `/var/lib/smokeping` (smokeping:netprobe, mode 2770)
+- Reload servizio gestito dalla webapp tramite **sudoers** limitato.
+
+### Troubleshooting SmokePing
+
+    # Stato e log
+    systemctl status smokeping --no-pager -n 100
+    journalctl -u smokeping -n 200 --no-pager
+
+    # Convalida configurazione
+    smokeping --check 2>/dev/null || /usr/sbin/smokeping --check
+
+    # Apache (CGI)
+    a2enconf smokeping
+    systemctl reload apache2
+    journalctl -u apache2 -n 200 --no-pager
+
+---
+
+## 7) Impostazioni Sniffer
 
 Pagina **/pcap/settings**:
 
--   **Durata massima** per cattura
-
--   **Quota storage** (GB) su `/var/lib/netprobe/pcap`
-
--   **Policy** a quota piena:
-
-    -   `rotate` → elimina le catture più vecchie
-
-    -   `block` → blocca nuove catture
-
--   **Refresh UI** (ms)
-
--   **Consenti filtri BPF** (on/off)
+- **Durata massima** per cattura  
+- **Quota storage** (GB) su `/var/lib/netprobe/pcap`  
+- **Policy** a quota piena:
+  - `rotate` → elimina le catture più vecchie
+  - `block` → blocca nuove catture
+- **Refresh UI** (ms)  
+- **Consenti filtri BPF** (on/off)
 
 I valori sono in `/etc/netprobe/pcap.json`.
 
-* * * * *
+---
 
-7) Gestione servizi
--------------------
+## 8) Gestione servizi
 
-`# API (FastAPI / Uvicorn)
-systemctl status netprobe-api
-systemctl restart netprobe-api
-
-# Web (Apache)
-systemctl status apache2
-systemctl reload apache2
-
-# SmokePing
-systemctl status smokeping
-systemctl reload smokeping`
+    # API (FastAPI / Uvicorn)
+    systemctl status netprobe-api
+    systemctl restart netprobe-api
+    
+    # Web (Apache)
+    systemctl status apache2
+    systemctl reload apache2
+    
+    # SmokePing
+    systemctl status smokeping
+    systemctl reload smokeping
 
 Log utili:
 
-`# Log installer
-less /var/log/testmachine-install.log
+    # Log installer
+    less /var/log/testmachine-install.log
+    
+    # Apache
+    journalctl -u apache2 -n 200 --no-pager
+    
+    # API
+    journalctl -u netprobe-api -n 200 --no-pager
 
-# Apache
-journalctl -u apache2 -n 200 --no-pager
+---
 
-# API
-journalctl -u netprobe-api -n 200 --no-pager`
+## 9) Sicurezza
 
-* * * * *
+- Cattura con **dumpcap** + **capabilities** (no root).  
+- Solo **interfacce enumerate** sono valide.  
+- Nomi file generati server-side (niente traversal).  
+- **Una** cattura attiva alla volta (rate-limit soft).  
+- Possibile disabilitare i **filtri BPF** custom.  
+- Proteggi l’accesso alla UI (cambia password, eventualmente limita IP su Apache).
 
-8) Sicurezza
-------------
+---
 
--   Cattura con **dumpcap** + **capabilities** (no root).
+## 10) Troubleshooting generale
 
--   Solo **interfacce enumerate** sono valide.
+**503 Service Unavailable (Apache)** – API giù o non avviata:
 
--   Nomi file generati server-side (niente traversal).
-
--   **Una** cattura attiva alla volta (rate-limit soft).
-
--   Possibile disabilitare i **filtri BPF** custom.
-
--   Proteggi l'accesso alla UI (cambia password, eventualmente limita IP su Apache).
-
-* * * * *
-
-9) Troubleshooting
-------------------
-
-**503 Service Unavailable (Apache)**\
-API giù o non avviata:
-
-`systemctl status netprobe-api --no-pager -n 50
-journalctl -u netprobe-api -n 200 --no-pager`
+    systemctl status netprobe-api --no-pager -n 50
+    journalctl -u netprobe-api -n 200 --no-pager
 
 **Avvio PCAP fallisce**
 
-`# capability su dumpcap
-getcap /usr/bin/dumpcap
-# atteso: cap_net_admin,cap_net_raw+eip
+    # capability su dumpcap
+    getcap /usr/bin/dumpcap   # atteso: cap_net_admin,cap_net_raw+eip
+    
+    # permessi directory
+    ls -ld /var/lib/netprobe/pcap   # netprobe:netprobe 2770
+    
+    # quota piena e policy=block → libera spazio o passa a rotate
 
-# permessi directory
-ls -ld /var/lib/netprobe/pcap   # netprobe:netprobe 2770
+**Nessuna interfaccia in lista** – `dumpcap -D` dovrebbe elencarle; se vuoto, verifica driver e `ip link`.
 
-# quota piena e policy=block → libera spazio o passa a rotate`
+**Analisi vuota** – Verifica `tshark` / `capinfos`:
 
-**Nessuna interfaccia in lista**\
-`dumpcap -D` dovrebbe elencarle; se vuoto, verifica driver e `ip link`.
+    tshark -v
+    capinfos -h
 
-**Analisi vuota**\
-Verifica `tshark` / `capinfos`:
+---
 
-`tshark -v
-capinfos -h`
+## 11) Disinstallazione
 
-* * * * *
+    # stop servizi
+    systemctl disable --now netprobe-api
+    a2dissite testmachine.conf
+    systemctl reload apache2
+    
+    # rimuovi app/unit (mantieni dati se vuoi)
+    rm -rf /opt/netprobe
+    rm -f /etc/systemd/system/netprobe-api.service
+    systemctl daemon-reload
+    
+    # opzionale: rimuovi dati/config
+    rm -rf /var/lib/netprobe
+    rm -rf /etc/netprobe
+    
+    # opzionale: rimuovi capability
+    setcap -r /usr/bin/dumpcap || true
 
-10) Disinstallazione
---------------------
+---
 
-`# stop servizi
-systemctl disable --now netprobe-api
-a2dissite testmachine.conf
-systemctl reload apache2
+## 12) Sviluppo
 
-# rimuovi app/unit (mantieni dati se vuoi)
-rm -rf /opt/netprobe
-rm -f /etc/systemd/system/netprobe-api.service
-systemctl daemon-reload
+    git clone https://github.com/<TUO_USER_O_ORG>/testmachine.git
+    cd testmachine
+    python3 -m venv venv
+    ./venv/bin/pip install -r requirements.txt
+    cd app
+    ../venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port 9000
+    # in prod sta dietro Apache; in dev puoi andare diretto su :9000
 
-# opzionale: rimuovi dati/config
-rm -rf /var/lib/netprobe
-rm -rf /etc/netprobe
+---
 
-# opzionale: rimuovi capability
-setcap -r /usr/bin/dumpcap || true`
-
-* * * * *
-
-11) Sviluppo
-------------
-
-`git clone https://github.com/<TUO_USER_O_ORG>/testmachine.git
-cd testmachine
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
-cd app
-../venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port 9000
-# in prod sta dietro Apache; in dev puoi andare diretto su :9000`
-
-* * * * *
-
-Licenza
--------
+## Licenza
 
 MIT (o altra licenza a tua scelta).

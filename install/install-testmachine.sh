@@ -24,7 +24,8 @@ apt-get install -y --no-install-recommends \
   python3 python3-venv python3-pip \
   apache2 apache2-utils \
   smokeping fping \
-  network-manager
+  network-manager \
+  tshark wireshark-common tcpdump libcap2-bin
 
 # --- utente/gruppo app ---
 step "Utente/gruppo ${APP_USER}"
@@ -111,6 +112,17 @@ a2ensite testmachine.conf >/dev/null || true
 step "SmokePing: conf Apache + permessi"
 a2enconf smokeping >/dev/null || true
 
+
+# --- Packet capture (dumpcap non-root via capability) ---
+step "Packet capture: abilita dumpcap non-root"
+# abilita la capability per catturare pacchetti senza root
+setcap cap_net_raw,cap_net_admin+eip /usr/bin/dumpcap || true
+getcap /usr/bin/dumpcap || true
+
+
+
+
+
 # gruppi/permessi: CGI (www-data) e demone (smokeping) devono poter leggere/scrivere
 usermod -aG "${APP_GROUP}" smokeping || true
 usermod -aG "${APP_GROUP}" www-data  || true
@@ -169,6 +181,11 @@ visudo -c
 # --- Workdir temporaneo dell’app ---
 step "Workdir temporaneo dell’app"
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe /var/lib/netprobe/tmp
+
+# directory per i file PCAP
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/pcap
+
+
 
 # --- Utenti/app default ---
 step "Seed /etc/netprobe/users.json (admin/admin)"

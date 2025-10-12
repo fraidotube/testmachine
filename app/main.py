@@ -7,6 +7,8 @@ from fastapi.templating import Jinja2Templates
 from routes.wan import router as wan_router
 from routes.lan import router as lan_router
 from routes.settings import router as settings_router
+from routes.pcap import router as pcap_router
+
 
 # Auth
 from routes.auth import router as auth_router, verify_session_cookie, _load_users  # _load_users per leggere i ruoli
@@ -24,7 +26,8 @@ PATH_ROLES = {
     "/wan":      ["admin", "operator"],        # config rete WAN
     "/lan":      ["admin", "operator"],        # config rete LAN
     "/smokeping":["admin", "operator", "viewer"],  # fruizione grafici
-    "/auth":     ["admin"],                    # gestione utenti/ruoli
+    "/auth":     ["admin"],                    # gestione utenti/ruoli 
+    "/pcap":     ["admin", "operator"],        # cattura pacchetti
 }
 
 # Percorsi sempre liberi
@@ -84,6 +87,8 @@ app.include_router(wan_router, prefix="/wan")
 app.include_router(lan_router, prefix="/lan")
 app.include_router(settings_router, prefix="/settings")
 app.include_router(auth_router)
+app.include_router(pcap_router)  # ha già prefix="/pcap"
+
 
 # (Opzionale) pannello admin Smokeping
 try:

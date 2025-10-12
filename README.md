@@ -1,273 +1,309 @@
 TestMachine
-===========
 
-Small network-diagnostics appliance for Debian.Includes:
+Appliance di diagnostica di rete per Debian:
 
-*   **Web UI** (FastAPI + Apache reverse proxy)
-    
-*   **SmokePing** latency charts
-    
-*   **Packet Capture (PCAP)**: start/stop captures, download, quick analysis (protocol hierarchy, endpoints, conversations, DNS/HTTP/SNI, top ports)
-    
-*   Safe, non-root packet capture via dumpcap capabilities
-    
-*   Simple **settings** for capture limits (quota, max duration, policy)
-    
+Web UI (FastAPI dietro Apache)
 
-> Default web UI: http://:8080/Default admin credentials: admin / admin (change after first login).
+SmokePing per latenza
 
-1) Requirements
----------------
+Packet Capture (PCAP): avvio/stop, download, analisi rapida (protocol hierarchy, endpoints, conversations, DNS/HTTP/SNI, top porte)
 
-*   Debian **12.6** (fresh install recommended)
-    
-*   Internet access for APT
-    
-*   Root access (or sudo) to run the installer
-    
+Cattura non-root tramite capability su dumpcap
 
-The installer will set up:
+Pagine Impostazioni Sniffer (quota, durata massima, policy)
 
-*   Packages: apache2, fastapi/uvicorn (via venv), smokeping, tshark, dumpcap, tcpdump, …
-    
-*   Systemd unit: netprobe-api
-    
-*   Apache vhost on port **8080** (configurable via env WEB\_PORT)
-    
-*   Directories & permissions:
-    
-    *   /opt/netprobe (app)
-        
-    *   /var/lib/netprobe (state)
-        
-    *   /var/lib/netprobe/pcap (captures)
-        
-    *   /etc/netprobe/users.json and /etc/netprobe/pcap.json (config)
-        
+UI predefinita: http://<IP_SERVER>:8080/
+Credenziali iniziali: admin / admin (cambiale subito).
 
-2) Set a static IP on Debian 12.6 (vanilla)
--------------------------------------------
+1) Requisiti
 
-You can use **nmtui** (easy) or **nmcli** (scriptable).
+Debian 12.6 “pulita”
 
-### Option A – nmtui (TUI)
+Accesso root (o sudo)
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   sudo apt-get update && sudo apt-get install -y network-manager  sudo nmtui   `
+Rete IPv4 raggiungibile
 
-In the TUI:
+L’installer prepara:
 
-1.  “Edit a connection” → select your interface (e.g., ens18).
-    
-2.  IPv4 configuration: **Manual**Address: 192.168.1.50/24Gateway: 192.168.1.1DNS: 1.1.1.1,8.8.8.8
-    
-3.  Save and **Activate connection** (or reboot).
-    
+Pacchetti: apache2, venv Python con FastAPI/Uvicorn, smokeping, tshark, dumpcap, tcpdump, …
 
-### Option B – nmcli
+Systemd unit netprobe-api
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   IFACE=ens18  IP=192.168.1.50/24  GW=192.168.1.1  DNS1=1.1.1.1  DNS2=8.8.8.8  sudo apt-get update && sudo apt-get install -y network-manager  sudo nmcli con mod "$IFACE" ipv4.method manual ipv4.addresses "$IP" ipv4.gateway "$GW" ipv4.dns "$DNS1,$DNS2" ipv6.method ignore  sudo nmcli con up "$IFACE"   `
+VHost Apache su 8080 (modificabile con WEB_PORT)
 
-Verify:
+Directory e permessi:
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   ip -4 a show dev "$IFACE"  ip r  resolvectl status   `
+/opt/netprobe (app)
 
-3) Install TestMachine
-----------------------
+/var/lib/netprobe (stato)
 
-Run as **root** (or with sudo):
+/var/lib/netprobe/pcap (catture)
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   # Choose a web port (optional, default 8080)  export WEB_PORT=8080  # Fetch and run the installer  curl -fsSL https://raw.githubusercontent.com//testmachine/main/install/install-testmachine.sh \    | bash   `
+/etc/netprobe/users.json e /etc/netprobe/pcap.json (config)
 
-What the installer does:
+2) Configurare a mano l’IP (funziona anche senza rete/pacchetti)
 
-*   Installs system packages
-    
-*   Creates netprobe user/group
-    
-*   Clones/updates this repo under /opt/netprobe
-    
-*   Creates Python venv and installs dependencies
-    
-*   Sets capabilities on /usr/bin/dumpcap (cap\_net\_raw,cap\_net\_admin+eip)
-    
-*   Seeds config:
-    
-    *   /etc/netprobe/users.json with admin/admin
-        
-    *   { "duration\_max": 3600, "quota\_gb": 5, "policy": "rotate", "poll\_ms": 1000, "allow\_bpf": true}
-        
-*   Enables & starts:
-    
-    *   netprobe-api (Uvicorn on 127.0.0.1:9000)
-        
-    *   Apache vhost reverse-proxy on :${WEB\_PORT}
-        
-    *   SmokePing
-        
+Sostituisci i valori tra <>:
 
-Quick checks:
+IFACE=<es. ens18>
+IP=192.168.1.50/24
+GW=192.168.1.1
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   systemctl status netprobe-api --no-pager -n 20  systemctl status apache2 --no-pager -n 20  systemctl status smokeping --no-pager -n 20   `
+# IP e link up
+ip addr add "$IP" dev "$IFACE"
+ip link set "$IFACE" up
 
-Open the UI: http://:8080/ (or chosen port)
+# Default route
+ip route add default via "$GW"
 
-4) First login
---------------
+# DNS (scrive un resolv.conf semplice)
+printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
 
-*   Username: **admin**
-    
-*   Password: **admin**
-    
 
-> Change the password immediately from the UI.
+Nota: se /etc/resolv.conf è un symlink (es. a systemd-resolved), puoi forzare un file reale così:
+
+rm -f /etc/resolv.conf
+printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
+
+
+Verifica:
+
+ping -c1 1.1.1.1
+ping -c1 google.com
+
+3) Installazione
+
+Esegui come root:
+
+# (opzionale) porta web diversa da 8080
+export WEB_PORT=8080
+
+# scarica ed esegui l'installer
+curl -fsSL https://raw.githubusercontent.com/<TUO_USER_O_ORG>/testmachine/main/install/install-testmachine.sh | bash
+
+
+Cosa fa lo script:
+
+Installa pacchetti
+
+Crea utente/gruppo netprobe
+
+Clona/aggiorna il repo in /opt/netprobe
+
+Crea venv Python + dipendenze
+
+Imposta capability su /usr/bin/dumpcap (cap_net_raw,cap_net_admin+eip)
+
+Seed config:
+
+/etc/netprobe/users.json → admin/admin
+
+/etc/netprobe/pcap.json:
+
+{
+  "duration_max": 3600,
+  "quota_gb": 5,
+  "policy": "rotate",
+  "poll_ms": 1000,
+  "allow_bpf": true
+}
+
+
+Abilita/avvia servizi:
+
+netprobe-api (Uvicorn su 127.0.0.1:9000)
+
+Apache vhost su :${WEB_PORT}
+
+SmokePing
+
+Check rapidi:
+
+systemctl status netprobe-api --no-pager -n 20
+systemctl status apache2 --no-pager -n 20
+systemctl status smokeping --no-pager -n 20
+
+
+Apri la UI: http://<IP_SERVER>:8080/ (o la porta scelta)
+
+4) Primo accesso
+
+Utente: admin
+
+Password: admin
+
+Cambia la password dal menu utente.
 
 5) Packet Capture (PCAP)
-------------------------
+Avvio
 
-### Start a capture
+Vai su Packet Capture.
 
-1.  Go to **Packet Capture** from the sidebar/home.
-    
-2.  Choose **Interface**, **Duration**, **Snaplen**, optional **BPF filter**.
-    
-3.  Click **Avvia**.
-    
-4.  While running, you’ll see a **countdown**, file name and size, and a **Stop** button.
-    
+Seleziona Interfaccia, Durata, Snaplen, (opz.) Filtro BPF.
 
-### Snaplen
+Avvia.
+Durante la cattura vedi countdown, file/size e un bottone Stop.
 
-*   Maximum bytes saved **per packet**.
-    
-*   262144 ≈ full frame (no truncation).
-    
-*   Lower values reduce disk usage but may truncate payloads.
-    
+Snaplen
 
-### BPF filter quick guide
+Byte massimi per pacchetto.
 
-Examples:
+262144 ≈ pacchetto completo.
 
-*   Host: host 8.8.8.8 — src host 192.168.1.10 — dst host 1.1.1.1
-    
-*   Network: net 192.168.1.0/24
-    
-*   Port: port 53, tcp port 443, portrange 1000-2000
-    
-*   Protocol: icmp, arp, tcp, udp, vlan
-    
-*   Combine: tcp and port 80 and host 1.2.3.4
-    
-*   HTTP/DNS/TLS: port 80 or port 443, port 53
-    
-*   Exclude yourself: and not host 192.168.1.5
-    
+Ridurre il valore limita lo spazio ma può troncare i payload.
 
-> You can disable custom BPF filters in **Impostazioni Sniffer** if needed.
+Filtri BPF — esempi
 
-### Download & Analyze
+Host: host 8.8.8.8 — src host 192.168.1.10 — dst host 1.1.1.1
 
-*   **Catture recenti** → _Scarica_ (gets .pcapng)
-    
-*   **Analizza**: in-browser quick analysis shows:
-    
-    *   Overview (packets / bytes / duration)
-        
-    *   Protocol hierarchy
-        
-    *   Top endpoints
-        
-    *   Top conversations
-        
-    *   Top DNS queries, HTTP Host headers, TLS SNI
-        
-    *   Top ports (TCP/UDP)
-        
+Rete: net 192.168.1.0/24
 
-6) Sniffer Settings
--------------------
+Porta: port 53, tcp port 443, portrange 1000-2000
 
-**/pcap/settings** page controls:
+Protocollo: icmp, arp, tcp, udp, vlan
 
-*   **Durata massima** per cattura
-    
-*   **Quota storage** (GB) on /var/lib/netprobe/pcap
-    
-*   **Policy** when quota is full:
-    
-    *   rotate → delete oldest captures to make space
-        
-    *   block → reject new captures
-        
-*   **Refresh UI** (ms)
-    
-*   **Consenti filtri BPF** (on/off)
-    
+Combinazioni: tcp and port 80 and host 1.2.3.4
 
-Values are saved to /etc/netprobe/pcap.json.
+HTTP/DNS/TLS: port 80 or port 443, port 53
 
-7) Service management
----------------------
+Escludere se stesso: and not host 192.168.1.5
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   # API (FastAPI / Uvicorn)  sudo systemctl status netprobe-api  sudo systemctl restart netprobe-api  # Web server (Apache)  sudo systemctl status apache2  sudo systemctl reload apache2  # SmokePing  sudo systemctl status smokeping  sudo systemctl reload smokeping   `
+Puoi disabilitare i filtri BPF personalizzati in Impostazioni Sniffer.
 
-Logs:
+Download & Analisi
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   # Installer log  sudo less /var/log/testmachine-install.log  # Apache  sudo journalctl -u apache2 -n 200 --no-pager  # API  sudo journalctl -u netprobe-api -n 200 --no-pager   `
+Catture recenti → Scarica (.pcapng)
 
-8) Security notes
------------------
+Analizza: mostra
 
-*   Packet capture runs via **dumpcap** with Linux **capabilities** (no root).
-    
-*   Only **listed interfaces** are allowed.
-    
-*   File names are generated server-side; traversal is blocked.
-    
-*   One active capture at a time (soft rate-limit).
-    
-*   Optional **BPF filter** sanitization via UI setting.
-    
-*   Protect access to the web UI (change default password, consider limiting access at the Apache layer if needed).
-    
+Overview (packets/bytes/duration)
+
+Protocol hierarchy
+
+Top endpoints
+
+Top conversations
+
+Top DNS queries, HTTP Host, TLS SNI
+
+Top porte (TCP/UDP)
+
+6) Impostazioni Sniffer
+
+Pagina /pcap/settings:
+
+Durata massima per cattura
+
+Quota storage (GB) su /var/lib/netprobe/pcap
+
+Policy a quota piena:
+
+rotate → elimina le catture più vecchie
+
+block → blocca nuove catture
+
+Refresh UI (ms)
+
+Consenti filtri BPF (on/off)
+
+I valori sono in /etc/netprobe/pcap.json.
+
+7) Gestione servizi
+# API (FastAPI / Uvicorn)
+systemctl status netprobe-api
+systemctl restart netprobe-api
+
+# Web (Apache)
+systemctl status apache2
+systemctl reload apache2
+
+# SmokePing
+systemctl status smokeping
+systemctl reload smokeping
+
+
+Log utili:
+
+# Log installer
+less /var/log/testmachine-install.log
+
+# Apache
+journalctl -u apache2 -n 200 --no-pager
+
+# API
+journalctl -u netprobe-api -n 200 --no-pager
+
+8) Sicurezza
+
+Cattura con dumpcap + capabilities (no root).
+
+Solo interfacce enumerate sono valide.
+
+Nomi file generati server-side (niente traversal).
+
+Una cattura attiva alla volta (rate-limit soft).
+
+Possibile disabilitare i filtri BPF custom.
+
+Proteggi l’accesso alla UI (cambia password, eventualmente limita IP su Apache).
 
 9) Troubleshooting
-------------------
 
-**503 Service Unavailable (Apache)**API may be down or slow to start:
+503 Service Unavailable (Apache)
+API giù o non avviata:
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   systemctl status netprobe-api --no-pager -n 50  journalctl -u netprobe-api -n 200 --no-pager   `
+systemctl status netprobe-api --no-pager -n 50
+journalctl -u netprobe-api -n 200 --no-pager
 
-**PCAP start fails**
 
-*   getcap /usr/bin/dumpcap# expected: cap\_net\_admin,cap\_net\_raw+eip
-    
-*   ls -ld /var/lib/netprobe/pcap# netprobe:netprobe 2770
-    
-*   Quota reached & policy=block → free space or switch to rotate.
-    
+Avvio PCAP fallisce
 
-**No interfaces listed**
+# capability su dumpcap
+getcap /usr/bin/dumpcap
+# atteso: cap_net_admin,cap_net_raw+eip
 
-*   NetworkManager not controlling the interface? Still shown via dumpcap -D. If empty, verify drivers and ip link.
-    
+# permessi directory
+ls -ld /var/lib/netprobe/pcap   # netprobe:netprobe 2770
 
-**Analyze page empty**
+# quota piena e policy=block → libera spazio o passa a rotate
 
-*   tshark -vcapinfos -h
-    
 
-10) Uninstall
--------------
+Nessuna interfaccia in lista
+dumpcap -D dovrebbe elencarle; se vuoto, verifica driver e ip link.
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   # Stop services  sudo systemctl disable --now netprobe-api  sudo a2dissite testmachine.conf  sudo systemctl reload apache2  # Remove app & units (keep data/config if you want)  sudo rm -rf /opt/netprobe  sudo rm -f /etc/systemd/system/netprobe-api.service  sudo systemctl daemon-reload  # Optional: remove data/config (careful!)  sudo rm -rf /var/lib/netprobe  sudo rm -rf /etc/netprobe  # Optionally revert capabilities  sudo setcap -r /usr/bin/dumpcap || true   `
+Analisi vuota
+Verifica tshark / capinfos:
 
-11) Development
----------------
+tshark -v
+capinfos -h
 
-Plain textANTLR4BashCC#CSSCoffeeScriptCMakeDartDjangoDockerEJSErlangGitGoGraphQLGroovyHTMLJavaJavaScriptJSONJSXKotlinLaTeXLessLuaMakefileMarkdownMATLABMarkupObjective-CPerlPHPPowerShell.propertiesProtocol BuffersPythonRRubySass (Sass)Sass (Scss)SchemeSQLShellSwiftSVGTSXTypeScriptWebAssemblyYAMLXML`   git clone https://github.com//testmachine.git  cd testmachine  python3 -m venv venv && ./venv/bin/pip install -r requirements.txt  cd app && ../venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port 9000  # Fronted by Apache in production; for dev, visit http://:9000/   `
+10) Disinstallazione
+# stop servizi
+systemctl disable --now netprobe-api
+a2dissite testmachine.conf
+systemctl reload apache2
 
-License
--------
+# rimuovi app/unit (mantieni dati se vuoi)
+rm -rf /opt/netprobe
+rm -f /etc/systemd/system/netprobe-api.service
+systemctl daemon-reload
 
-MIT (or your chosen license).
+# opzionale: rimuovi dati/config
+rm -rf /var/lib/netprobe
+rm -rf /etc/netprobe
+
+# opzionale: rimuovi capability
+setcap -r /usr/bin/dumpcap || true
+
+11) Sviluppo
+git clone https://github.com/<TUO_USER_O_ORG>/testmachine.git
+cd testmachine
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+cd app
+../venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port 9000
+# in prod sta dietro Apache; in dev puoi andare diretto su :9000
+
+Licenza
+
+MIT (o altra licenza a tua scelta).

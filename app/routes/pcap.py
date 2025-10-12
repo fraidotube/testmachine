@@ -1,15 +1,108 @@
-from fastapi import APIRouter, Request, Form, Query
+from fastapi import APIRouter, Form, Query
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from html import escape
 from pathlib import Path
-import os, json, time, subprocess, shlex, re
+import os, json, time, subprocess, re, signal
+from stat import S_IMODE
+
 
 router = APIRouter(prefix="/pcap", tags=["pcap"])
 
 CAP_DIR   = Path("/var/lib/netprobe/pcap")
 META_FILE = CAP_DIR / "captures.json"
 
-# -------- utils base --------
+CONFIG_PATH = Path("/etc/netprobe/pcap.json")
+DEFAULT_CFG = {
+    "duration_max": 3600,   # s (limite superiore UI e backend)
+    "quota_gb": 5,          # spazio massimo in /var/lib/netprobe/pcap
+    "policy": "rotate",     # "rotate" = elimina più vecchi, "block" = blocca nuovi
+    "poll_ms": 1000,        # refresh stato UI (ms)
+    "allow_bpf": True       # consenti filtri BPF custom
+}
+
+# ---- BPF sanitize ----
+_BPF_OK = r"a-zA-Z0-9_ \.\:\-\/\(\)<>="
+_BPF_RE = re.compile(rf"^[{_BPF_OK}]+$")
+
+def _sanitize_bpf(bpf: str, allow_bpf: bool, max_len: int = 256) -> str:
+    """
+    Consente solo un sottoinsieme sicuro della sintassi tcpdump/tshark.
+    Taglia lunghezze e rimuove caratteri pericolosi. Se non valido, torna "".
+    """
+    if not allow_bpf:
+        return ""
+    s = (bpf or "").strip()
+    if not s:
+        return ""
+    if len(s) > max_len:
+        s = s[:max_len]
+    # vieta backtick, quote, semicolons, pipe, ampersand ecc.
+    if any(c in s for c in ['`', '"', "'", ';', '|', '&', '#', '$', '\\']):
+        return ""
+    if not _BPF_RE.match(s):
+        return ""
+    return s
+
+
+def _ensure_cfg():
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.write_text(json.dumps(DEFAULT_CFG, indent=2), encoding="utf-8")
+
+def _load_cfg():
+    _ensure_cfg()
+    try:
+        data = json.loads(CONFIG_PATH.read_text("utf-8"))
+    except Exception:
+        data = {}
+    # merge con default per chiavi mancanti
+    cfg = {**DEFAULT_CFG, **(data or {})}
+    return cfg
+
+def _save_cfg(cfg: dict):
+    _ensure_cfg()
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    os.replace(tmp, CONFIG_PATH)
+
+def _capdir_size() -> int:
+    total = 0
+    for p in CAP_DIR.glob("*.pcapng"):
+        try:
+            total += p.stat().st_size
+        except Exception:
+            pass
+    return total
+
+def _apply_quota_rotation(quota_bytes: int) -> int:
+    """
+    Se la dir supera quota, elimina i file più vecchi finché rientra.
+    Rimuove anche i metadati associati.
+    Ritorna quanti file sono stati cancellati.
+    """
+    total = _capdir_size()
+    if total <= quota_bytes:
+        return 0
+    # ordina per mtime crescente
+    files = sorted(CAP_DIR.glob("*.pcapng"), key=lambda p: p.stat().st_mtime)
+    removed = 0
+    meta = _load_meta()
+    for p in files:
+        try:
+            sz = p.stat().st_size
+            p.unlink()
+            removed += 1
+            total -= sz
+            # pulisci metadati
+            meta["captures"] = [c for c in meta.get("captures", []) if c.get("file") != p.name]
+            if total <= quota_bytes:
+                break
+        except Exception:
+            pass
+    _save_meta(meta)
+    return removed
+
+# ---------- utils ----------
 def _run(cmd:list[str], timeout:int|None=None):
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return p.returncode, p.stdout, p.stderr
@@ -39,17 +132,13 @@ def _alive(pid:int)->bool:
         return False
 
 def _list_ifaces():
-    # usa dumpcap -D (più affidabile per cattura)
-    rc, out, err = _run(["/usr/bin/dumpcap","-D"])
+    rc, out, _ = _run(["/usr/bin/dumpcap","-D"])
     if rc == 0 and out.strip():
         items = []
         for line in out.splitlines():
-            # "1. eth0\n" o "1. eth0 (desc)"
             m = re.match(r"\s*\d+\.\s+([^\s]+)", line)
-            if m:
-                items.append(m.group(1))
+            if m: items.append(m.group(1))
         if items: return items
-    # fallback nmcli/ip
     rc, out, _ = _run(["/usr/bin/nmcli","-t","-f","DEVICE,TYPE,STATE","dev","status"])
     devs=[]
     if rc==0 and out.strip():
@@ -63,40 +152,34 @@ def _list_ifaces():
         rc, out, _ = _run(["/usr/sbin/ip","-o","link","show"])
         if rc==0:
             for line in out.splitlines():
-                try: name=line.split(":")[1].strip().split("@")[0]
-                except Exception: continue
-                if name and name!="lo":
-                    devs.append(name)
-    # dedup + ord
-    seen = []
+                try:
+                    name=line.split(":")[1].strip().split("@")[0]
+                    if name and name!="lo":
+                        devs.append(name)
+                except Exception:
+                    pass
+    seen=[]
     for d in devs:
         if d not in seen: seen.append(d)
     return seen
 
 def _list_files():
     CAP_DIR.mkdir(parents=True, exist_ok=True)
-    files = []
+    files=[]
     for p in sorted(CAP_DIR.glob("*.pcapng")):
-        st = p.stat()
-        files.append({
-            "name": p.name,
-            "size": st.st_size,
-            "mtime": int(st.st_mtime),
-        })
+        st=p.stat()
+        files.append({"name":p.name,"size":st.st_size,"mtime":int(st.st_mtime)})
     return files
 
-# -------- parsing analisi --------
+# ---------- parsing analisi ----------
 def _capinfos_overview(path:Path):
-    # richiede capinfos (da wireshark-common)
-    rc, out, err = _run(["/usr/bin/capinfos", "-Tm", "-a", "-c", str(path)], timeout=20)
-    if rc != 0:
-        # fallback grossolano con tshark: conta pacchetti e somma lenght
-        rc2, out2, err2 = _run(["/usr/bin/tshark","-r",str(path),"-T","fields","-e","frame.len"], timeout=30)
+    rc, out, _ = _run(["/usr/bin/capinfos","-Tm","-a","-c",str(path)], timeout=20)
+    if rc!=0:
+        rc2, out2, _ = _run(["/usr/bin/tshark","-r",str(path),"-T","fields","-e","frame.len"], timeout=30)
         if rc2==0:
             lens = [int(x) for x in out2.split() if x.isdigit()]
-            return {"packets": len(lens), "bytes": sum(lens), "duration_s": None}
+            return {"packets":len(lens),"bytes":sum(lens),"duration_s":None}
         return {}
-    # parse capinfos output
     pkts = re.search(r"Number of packets:\s+([\d,]+)", out)
     bytes_ = re.search(r"File size:\s+([\d,]+)\s+bytes", out)
     dur = re.search(r"Capture duration:\s+([0-9.]+)\s+seconds", out)
@@ -110,76 +193,69 @@ def _tshark_table(cmd:list[str], header_regex:str):
     rc, out, err = _run(cmd, timeout=40)
     if rc != 0:
         return {"raw": out+err}
-    # Estrae tabella a colonne da blocchi di output -z di tshark
     lines = [l for l in out.splitlines() if l.strip()]
-    # trova intestazione (riga che contiene i titoli)
-    hdr_idx = None
+    hdr_idx=None
     for i,l in enumerate(lines):
         if re.search(header_regex, l):
-            hdr_idx = i
-            break
+            hdr_idx=i; break
     if hdr_idx is None:
         return {"rows":[]}
-    # le righe dati sono dopo l'header fino a riga vuota oppure fine blocco
-    rows = []
+    rows=[]
     for l in lines[hdr_idx+1:]:
-        if re.match(r"[-=]+\s*$", l):  # separatore eventuale
-            continue
-        if l.strip()=="":
-            break
+        if re.match(r"[-=]+\s*$", l): continue
+        if l.strip()=="": break
         rows.append(re.sub(r"\s{2,}","\t", l.strip()).split("\t"))
-    return {"rows": rows}
+    return {"rows":rows}
 
 def _top_list(cmd:list[str], field:str, n:int=10):
-    rc, out, err = _run(cmd, timeout=30)
-    if rc != 0:
-        return []
-    counts = {}
+    rc, out, _ = _run(cmd, timeout=30)
+    if rc != 0: return []
+    counts={}
     for line in out.splitlines():
-        s = line.strip()
+        s=line.strip()
         if not s: continue
-        counts[s] = counts.get(s,0) + 1
-    ranked = sorted(counts.items(), key=lambda x:x[1], reverse=True)[:n]
-    return [{"value":k, "count":v} for k,v in ranked]
+        counts[s]=counts.get(s,0)+1
+    ranked=sorted(counts.items(), key=lambda x:x[1], reverse=True)[:n]
+    return [{"value":k,"count":v} for k,v in ranked]
 
-def _top_ports(path: Path, n: int = 10):
-    """Conta le porte più viste (dst o src, TCP/UDP)."""
-    rc, out, err = _run(
-        ["/usr/bin/tshark", "-r", str(path),
-         "-T", "fields",
-         "-e", "tcp.srcport", "-e", "tcp.dstport",
-         "-e", "udp.srcport", "-e", "udp.dstport"], timeout=30)
-    if rc != 0:
-        return []
-    counts = {}
+def _top_ports(path:Path, n:int=10):
+    rc, out, _ = _run(
+        ["/usr/bin/tshark","-r",str(path),
+         "-T","fields",
+         "-e","tcp.srcport","-e","tcp.dstport",
+         "-e","udp.srcport","-e","udp.dstport"], timeout=30)
+    if rc!=0: return []
+    counts={}
     for line in out.splitlines():
         for v in line.strip().split("\t"):
             if v and v.isdigit():
-                counts[v] = counts.get(v, 0) + 1
-    top = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:n]
-    return [{"port": k, "count": v} for k, v in top]
+                counts[v]=counts.get(v,0)+1
+    top=sorted(counts.items(), key=lambda x:x[1], reverse=True)[:n]
+    return [{"port":k,"count":v} for k,v in top]
 
-
-# -------- HTML helpers --------
+# ---------- HTML helpers ----------
 def _page_head(title:str)->str:
-    return f"<!doctype html><html><head><meta charset='utf-8'/>" \
-           f"<meta name='viewport' content='width=device-width,initial-scale=1'/>" \
-           f"<title>{escape(title)}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>" \
-           f"<div class='container'><div class='nav'><div class='brand'><img src='/static/img/logo.svg' class='logo'/>" \
-           f"<span>TestMachine</span></div><div class='links'><a href='/'>Home</a></div></div>"
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'/>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
+        f"<title>{escape(title)}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>"
+        "<div class='container'><div class='nav'><div class='brand'>"
+        "<img src='/static/img/logo.svg' class='logo'/><span>TestMachine</span>"
+        "</div><div class='links'><a href='/'>Home</a></div></div>"
+    )
 
-# -------- Pagine --------
-
+# ---------- Pagine ----------
 @router.get("/", response_class=HTMLResponse)
 def page():
-    ifaces = _list_ifaces()
-    opt = "".join(f"<option value='{escape(i)}'>{escape(i)}</option>" for i in ifaces)
-    files = _list_files()
+    cfg = _load_cfg()
+    ifaces=_list_ifaces()
+    opt="".join(f"<option value='{escape(i)}'>{escape(i)}</option>" for i in ifaces)
+    files=_list_files()
 
-    rows = []
+    rows=[]
     for f in reversed(files):
-        rows.append(f"""
-<div class='pcap-row'>
+        rows.append(
+f"""<div class='pcap-row'>
   <div class='pcap-meta'>
     <b class='pcap-name'>{escape(f['name'])}</b>
     <div class='pcap-when'>{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(f['mtime']))}</div>
@@ -193,17 +269,15 @@ def page():
       <button class='btn danger' type='submit'>Elimina</button>
     </form>
   </div>
-</div>
-""")
-    list_html = "".join(rows) or "<div class='muted'>Nessun file.</div>"
+</div>"""
+        )
+    list_html="".join(rows) or "<div class='muted'>Nessun file.</div>"
 
-    return HTMLResponse(_page_head("Packet Capture") + """
+    html = _page_head("Packet Capture") + """
 <style>
-  /* --- griglia dedicata a /pcap --- */
   .pcap-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
   @media (max-width:1000px){.pcap-grid{grid-template-columns:1fr}}
 
-  /* --- lista catture, full width, niente card annidate --- */
   .pcap-list{width:100%;display:flex;flex-direction:column;gap:10px}
   .pcap-row{
     display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;
@@ -216,7 +290,6 @@ def page():
   .pcap-size{white-space:nowrap;justify-self:end;opacity:.95}
   .pcap-actions{display:flex;gap:8px;flex-wrap:wrap;justify-self:end}
   .inline-form{display:inline}
-  /* wrap sotto su schermi medi/piccoli */
   @media (max-width:1100px){
     .pcap-row{grid-template-columns:1fr auto}
     .pcap-actions{grid-column:1/-1;justify-self:start}
@@ -225,20 +298,18 @@ def page():
     .pcap-row{grid-template-columns:1fr}
     .pcap-size,.pcap-actions{justify-self:start}
   }
-
-  /* snaplen hint più leggibile e compatto */
   .tiny{font-size:.9rem;opacity:.85}
   code{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace}
   .bullets li{margin:4px 0}
 </style>
-""" + f"""
+
 <div class='pcap-grid'>
 
   <div class='card'>
-    <h2>Nuova cattura</h2>
+    <h2>Nuova cattura <a class="btn secondary" href="/pcap/settings" style="float:right">Impostazioni</a></h2>
     <form method='post' action='/pcap/start' id='startForm'>
       <label>Interfaccia</label>
-      <select name='iface'>{opt}</select>
+      <select name='iface'>__OPT__</select>
 
       <div class='row'>
         <div>
@@ -258,13 +329,20 @@ def page():
     </form>
 
     <div id='activeBox' class='notice' style='margin-top:12px; display:none'>
-      ⏱️ Cattura in corso… resta <span id='remain'>-</span>s — file: <span id='actfile'>-</span>
+      ⏱️ Cattura in corso… resta <b><span id='remain'>-</span>s</b> — file: <code id='actfile'>-</code>
+      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class='btn danger' type='button' onclick='stopNow()'>Stop</button>
+        <span class='muted' id='actsize'>(0 B)</span>
+      </div>
+      <form id="stopForm" method="post" action="/pcap/stop" class="inline-form" style="display:none">
+        <input type="hidden" name="file" id="stopFile" value="">
+      </form>
     </div>
   </div>
 
   <div class='card'>
     <h2>Catture recenti</h2>
-    <div class='pcap-list'>{list_html}</div>
+    <div class='pcap-list'>__LIST__</div>
   </div>
 
   <div class='card' style='grid-column:1/-1'>
@@ -285,28 +363,57 @@ def page():
 </div>
 
 <script>
-async function pollStatus(){{
-  try {{
+async function stopNow(){
+  const file = document.getElementById('stopFile').value;
+  if(!file) return;
+  try{
+    await fetch('/pcap/stop', {
+      method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded'},
+      body: 'file=' + encodeURIComponent(file)
+    });
+  }catch(e){}
+  setTimeout(()=>location.reload(), 500);
+}
+
+function fmtBytes(b){
+  if(!b) return "0 B";
+  const u=["B","KB","MB","GB","TB"];
+  let i=0,v=Number(b);
+  while(v>=1024 && i<u.length-1){v/=1024;i++;}
+  return v.toFixed(1)+" "+u[i];
+}
+
+async function pollStatus(){
+  try{
     const r = await fetch('/pcap/status');
     if(!r.ok) throw new Error('status http '+r.status);
     const js = await r.json();
     const box = document.getElementById('activeBox');
-    if(js.active && js.active.length > 0){{
-      box.style.display = '';
+    if(js.active && js.active.length > 0){
       const a = js.active[0];
+      box.style.display = '';
       document.getElementById('remain').textContent = Math.max(0, Math.floor(a.remaining_s));
       document.getElementById('actfile').textContent = a.file;
-      if(a.remaining_s <= 0) setTimeout(() => location.reload(), 1200);
-    }} else {{
+      document.getElementById('actsize').textContent = fmtBytes(a.size || 0);
+      document.getElementById('stopFile').value = a.file;
+      if(a.remaining_s <= 0){
+        box.style.display = 'none';
+        setTimeout(()=>location.reload(), 600);
+      }
+    } else {
       box.style.display = 'none';
-    }}
-  }} catch(e) {{}}
-}}
-setInterval(pollStatus, 1000);
+    }
+  } catch(e) {}
+}
+setInterval(pollStatus, __POLL__);
 pollStatus();
 </script>
 </body></html>
-""")
+"""
+    html = html.replace("__OPT__", opt).replace("__LIST__", list_html)
+    html = html.replace("__POLL__", str(int(cfg.get("poll_ms", 1000))))
+    return HTMLResponse(html)
 
 @router.get("/analyze", response_class=HTMLResponse)
 def analyze(file: str = Query(...)):
@@ -317,14 +424,10 @@ def analyze(file: str = Query(...)):
 
     html = _page_head("Analisi cattura") + """
 <style>
-  /* griglia responsiva: 1..N colonne senza overflow */
   .grid2{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(420px,1fr))}
-  /* KPI su 3 colonne, poi si adattano */
   .kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
   .kpi .card{padding:12px}
-  /* card più chiare su questa pagina */
   .card{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);box-shadow:0 6px 20px rgba(0,0,0,.20)}
-  /* tabelle scrollabili dentro la card */
   .table{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .table table{width:100%;border-collapse:collapse;table-layout:auto}
   .table th,.table td{white-space:nowrap;padding:8px 10px}
@@ -387,64 +490,91 @@ loadSummary();
 </script>
 </body></html>
 """
-    # inserisce il nome file in modo sicuro
     html = html.replace("__FILE__", escape(file))
     return HTMLResponse(html)
 
-
-
-
-# -------- API azioni --------
+# ---------- API ----------
 @router.get("/ifaces", response_class=JSONResponse)
 def ifaces():
     return {"ifaces": _list_ifaces()}
 
+def _has_active_capture(meta: dict | None = None) -> bool:
+    meta = meta or _load_meta()
+    now = int(time.time())
+    for c in meta.get("captures", []):
+        pid = c.get("pid")
+        dur = int(c.get("duration_s", 0) or 0)
+        start = int(c.get("start_ts", 0) or 0)
+        if pid and _alive(pid) and (now - start) < dur:
+            return True
+    return False
+
 @router.post("/start")
 def start_capture(iface: str = Form(...), duration: int = Form(...), bpf: str = Form(""), snaplen: int = Form(262144)):
     _ensure_dirs()
+
+    meta = _load_meta()
+    if _has_active_capture(meta):
+        return HTMLResponse("<script>alert('C’è già una cattura in corso. Ferma quella prima di avviarne un’altra.');window.location.href='/pcap';</script>")
+
+    cfg = _load_cfg()
+    duration_max = int(cfg.get("duration_max", DEFAULT_CFG["duration_max"]))
+    quota_bytes  = int(float(cfg.get("quota_gb", DEFAULT_CFG["quota_gb"])) * (1024**3))
+    policy       = str(cfg.get("policy", DEFAULT_CFG["policy"]))
+    allow_bpf    = bool(cfg.get("allow_bpf", True))
+
     if iface not in _list_ifaces():
         return HTMLResponse("<script>history.back();alert('Interfaccia non valida');</script>")
-    duration = max(1, min(int(duration), 3600))
-    snaplen = max(64, min(int(snaplen), 262144))
+
+    duration = max(1, min(int(duration), duration_max))
+    snaplen  = max(64, min(int(snaplen), 262144))
+    bpf = _sanitize_bpf(bpf, allow_bpf)
+    if not allow_bpf:
+        bpf = ""
+
+    # quota: rotate/block
+    current = _capdir_size()
+    if current >= quota_bytes:
+        if policy == "rotate":
+            _apply_quota_rotation(quota_bytes)
+        else:
+            return HTMLResponse("<script>alert('Quota PCAP piena: cattura bloccata (policy=block).');window.location.href='/pcap';</script>")
 
     ts = int(time.time())
     fname = f"{ts}_{iface}.pcapng"
     path = CAP_DIR / fname
 
-    # avvio dumpcap in background
-    cmd = ["/usr/bin/dumpcap", "-i", iface, "-P", "-s", str(snaplen), "-w", str(path), "-a", f"duration:{duration}"]
+    cmd = ["/usr/bin/dumpcap","-i",iface,"-P","-s",str(snaplen),"-w",str(path),"-a",f"duration:{duration}"]
     if bpf.strip():
         cmd += ["-f", bpf.strip()]
-    # usa Popen per avere pid
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
 
-    # registra metadati
-    meta = _load_meta()
     meta["captures"].append({
-        "file": fname,
-        "iface": iface,
-        "start_ts": ts,
-        "duration_s": duration,
-        "pid": proc.pid,
-        "filter": bpf.strip(),
+        "file": fname, "iface": iface, "start_ts": ts, "duration_s": duration,
+        "pid": proc.pid, "filter": bpf.strip(),
     })
     _save_meta(meta)
     return RedirectResponse(url="/pcap", status_code=303)
+
 
 @router.post("/stop")
 def stop_capture(file: str = Form(None)):
     meta = _load_meta()
     stopped = 0
     for c in meta.get("captures", []):
-        if file and c.get("file") != file: 
+        if file and c.get("file") != file:
             continue
         pid = c.get("pid")
         if pid and _alive(pid):
             try:
-                os.kill(pid, 15)  # TERM
-                stopped += 1
+                # abbiamo usato setsid: il pgid è il pid
+                os.killpg(pid, signal.SIGTERM)
             except Exception:
-                pass
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except Exception:
+                    pass
+            stopped += 1
     return JSONResponse({"stopped": stopped})
 
 @router.get("/status", response_class=JSONResponse)
@@ -452,20 +582,27 @@ def status():
     now = int(time.time())
     meta = _load_meta()
     active = []
+    changed = False
+
     for c in meta.get("captures", []):
         pid = c.get("pid")
         dur = int(c.get("duration_s", 0) or 0)
         start = int(c.get("start_ts", 0) or 0)
         remaining = max(0, dur - (now - start))
-        path = CAP_DIR / c["file"]
-        size = path.stat().st_size if path.exists() else 0
+        p = CAP_DIR / c["file"]
+        size = p.stat().st_size if p.exists() else 0
+
         if pid and _alive(pid) and remaining > 0:
-            active.append({
-                "file": c["file"],
-                "iface": c["iface"],
-                "remaining_s": remaining,
-                "size": size,
-            })
+            active.append({"file": c["file"], "iface": c["iface"], "remaining_s": remaining, "size": size})
+        else:
+            # non più attivo: pulizia pid
+            if c.get("pid"):
+                c["pid"] = None
+                changed = True
+
+    if changed:
+        _save_meta(meta)
+
     return {"active": active}
 
 @router.get("/list", response_class=JSONResponse)
@@ -488,7 +625,6 @@ def delete_file(file: str = Form(...)):
         path.unlink()
     except Exception:
         pass
-    # ripulisci metadata
     meta = _load_meta()
     meta["captures"] = [c for c in meta.get("captures", []) if c.get("file") != file]
     _save_meta(meta)
@@ -501,40 +637,89 @@ def summary(file: str = Query(...)):
     if not path.exists():
         return JSONResponse({"error":"missing"}, status_code=404)
 
-    data = {}
+    data={}
     data["overview"] = _capinfos_overview(path)
-
-    # protocol hierarchy
     data["phs"] = _tshark_table(
-        ["/usr/bin/tshark","-r",str(path),"-q","-z","io,phs"], header_regex=r"Protocol"
-    )
-
-    # endpoints (somma IPv4+IPv6)
-    ep = _tshark_table(
+        ["/usr/bin/tshark","-r",str(path),"-q","-z","io,phs"], header_regex=r"Protocol")
+    data["endpoints"] = _tshark_table(
         ["/usr/bin/tshark","-r",str(path),"-q","-z","endpoints,ip","-z","endpoints,ipv6","-z","endpoints,tcp","-z","endpoints,udp"],
-        header_regex=r"Endpoint"
-    )
-    data["endpoints"] = ep
-
-    # conversations
-    conv = _tshark_table(
+        header_regex=r"Endpoint")
+    data["conversations"] = _tshark_table(
         ["/usr/bin/tshark","-r",str(path),"-q","-z","conv,ip","-z","conv,ipv6","-z","conv,tcp","-z","conv,udp"],
-        header_regex=r"<->|Conversations"
-    )
-    data["conversations"] = conv
-
-        # DNS / HTTP host / TLS SNI (top 10) + porte
+        header_regex=r"<->|Conversations")
     data["dns"]  = _top_list(
-        ["/usr/bin/tshark","-r",str(path),"-Y","dns.flags.response==0 && dns.qry.name",
-         "-T","fields","-e","dns.qry.name"], "dns.qry.name", 10)
+        ["/usr/bin/tshark","-r",str(path),"-Y","dns.flags.response==0 && dns.qry.name","-T","fields","-e","dns.qry.name"],
+        "dns.qry.name", 10)
     data["http"] = _top_list(
-        ["/usr/bin/tshark","-r",str(path),"-Y","http.host",
-         "-T","fields","-e","http.host"], "http.host", 10)
+        ["/usr/bin/tshark","-r",str(path),"-Y","http.host","-T","fields","-e","http.host"],
+        "http.host", 10)
     data["sni"]  = _top_list(
-        ["/usr/bin/tshark","-r",str(path),"-Y","tls.handshake.extensions_server_name",
-         "-T","fields","-e","tls.handshake.extensions_server_name"],
+        ["/usr/bin/tshark","-r",str(path),"-Y","tls.handshake.extensions_server_name","-T","fields","-e","tls.handshake.extensions_server_name"],
         "tls.handshake.extensions_server_name", 10)
     data["ports"] = _top_ports(path, 10)
+    return JSONResponse(data)   # <-- QUI
 
-    return JSONResponse(data)
+@router.get("/settings", response_class=HTMLResponse)
+def pcap_settings():
+    cfg = _load_cfg()
+    html = _page_head("Impostazioni Packet Capture") + """
+<style>
+  .w400{max-width:400px}
+</style>
+<div class='grid'>
+  <div class='card w400'>
+    <h2>Impostazioni Sniffer</h2>
+    <form method='post' action='/pcap/settings'>
+      <label>Durata massima (s)</label>
+      <input type='number' name='duration_max' min='1' max='86400' value='__DUR__' required/>
 
+      <label>Quota storage (GB)</label>
+      <input type='number' step='0.1' min='1' name='quota_gb' value='__QUOTA__' required/>
+
+      <label>Policy quota</label>
+      <select name='policy'>
+        <option value='rotate' __SEL_ROT__>Ruota (elimina più vecchi)</option>
+        <option value='block'  __SEL_BLK__>Blocca nuove catture</option>
+      </select>
+
+      <label>Refresh UI (ms)</label>
+      <input type='number' name='poll_ms' min='250' max='10000' value='__POLL__' required/>
+
+      <label class='row' style='align-items:center;gap:10px'>
+        <input type='checkbox' name='allow_bpf' __BPF__/> Consenti filtri BPF personalizzati
+      </label>
+
+      <button class='btn' type='submit'>Salva</button>
+      <a class='btn secondary' href='/pcap/'>Torna a PCAP</a>
+    </form>
+  </div>
+</div>
+</div></body></html>
+"""
+    html = html.replace("__DUR__",  str(int(cfg.get("duration_max", 3600))))
+    html = html.replace("__QUOTA__", str(float(cfg.get("quota_gb", 5))))
+    html = html.replace("__POLL__", str(int(cfg.get("poll_ms", 1000))))
+    html = html.replace("__SEL_ROT__", "selected" if str(cfg.get("policy","rotate"))=="rotate" else "")
+    html = html.replace("__SEL_BLK__", "selected" if str(cfg.get("policy","rotate"))=="block" else "")
+    html = html.replace("__BPF__", "checked" if bool(cfg.get("allow_bpf", True)) else "")
+    return HTMLResponse(html)
+
+@router.post("/settings")
+def pcap_settings_save(duration_max: int = Form(...),
+                       quota_gb: float = Form(...),
+                       policy: str = Form(...),
+                       poll_ms: int = Form(...),
+                       allow_bpf: str = Form(None)):
+    cfg = _load_cfg()
+    cfg["duration_max"] = max(1, min(int(duration_max), 86400))
+    try:
+        cfg["quota_gb"] = max(1.0, float(quota_gb))
+    except Exception:
+        cfg["quota_gb"] = DEFAULT_CFG["quota_gb"]
+    cfg["policy"] = "rotate" if policy == "rotate" else "block"
+    cfg["poll_ms"] = max(250, min(int(poll_ms), 20000))
+    cfg["allow_bpf"] = bool(allow_bpf)  # checkbox -> on/None
+    _save_cfg(cfg)
+    return RedirectResponse(url="/pcap/settings", status_code=303)
+
+    

@@ -119,6 +119,25 @@ step "Packet capture: abilita dumpcap non-root"
 setcap cap_net_raw,cap_net_admin+eip /usr/bin/dumpcap || true
 getcap /usr/bin/dumpcap || true
 
+# se esiste il gruppo wireshark, aggiungi netprobe (alcune distro lo usano per i permessi di dumpcap)
+if getent group wireshark >/dev/null 2>&1; then
+  usermod -aG wireshark "${APP_USER}" || true
+fi
+
+# seed configurazione PCAP (se non presente)
+install -d -m 0755 /etc/netprobe
+if [[ ! -s /etc/netprobe/pcap.json ]]; then
+  cat >/etc/netprobe/pcap.json <<'JSON'
+{
+  "duration_max": 3600,
+  "quota_gb": 5,
+  "policy": "rotate",
+  "poll_ms": 1000,
+  "allow_bpf": true
+}
+JSON
+  chmod 0644 /etc/netprobe/pcap.json
+fi
 
 
 
@@ -206,6 +225,7 @@ fi
 step "Riavvio servizi"
 systemctl restart smokeping || true
 systemctl reload apache2 || systemctl restart apache2
+systemctl restart netprobe-api || true
 
 # --- check ---
 step "Check finali"

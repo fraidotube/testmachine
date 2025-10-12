@@ -5,11 +5,56 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>TestMachine</title>
   <link rel="stylesheet" href="/static/styles.css"/>
+  <style>
+    /* ---------- STATUS CARD ---------- */
+    .card--status{
+      background: linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.08));
+      border: 1px solid rgba(255,255,255,.25);
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
+    }
+    .status-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+    .kpi{display:flex;flex-direction:column;gap:6px;padding:10px;border-radius:12px;background:rgba(0,0,0,.2);border:1px solid rgba(255,255,255,.08)}
+    .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;font-size:.95rem;border:1px solid rgba(255,255,255,.1)}
+    .dot{width:9px;height:9px;border-radius:50%}
+    .ok{background:#22c55e}.bad{background:#ef4444}.warn{background:#f59e0b}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+    .ipbox{display:flex;flex-direction:column;gap:6px}
+    .addr{display:flex;align-items:center;gap:8px;white-space:nowrap}
+    .bar{height:8px;border-radius:999px;background:rgba(255,255,255,.15);overflow:hidden}
+    .bar>span{display:block;height:100%;background:linear-gradient(90deg,#60a5fa,#22d3ee)}
+    .muted-small{opacity:.85;font-size:.95rem}
+    .right{float:right}
+
+    /* ---------- TOOL CARDS COLORI & ICONE ---------- */
+    .card--tool{position:relative;overflow:hidden}
+    .card--tool h2{display:flex;align-items:center;gap:10px}
+    .card--smokeping{
+      background: linear-gradient(160deg, rgba(239,68,68,.25), rgba(239,68,68,.08));
+      border: 1px solid rgba(239,68,68,.35);
+    }
+    .card--pcap{
+      background: linear-gradient(160deg, rgba(14,165,233,.25), rgba(14,165,233,.08));
+      border: 1px solid rgba(14,165,233,.35);
+    }
+    .tool-icon{width:26px;height:26px;opacity:.95}
+
+    /* ---------- SETTINGS CARDS UNIFORME ---------- */
+    .card--settings{
+      background: linear-gradient(180deg, rgba(168,85,247,.18), rgba(168,85,247,.06));
+      border: 1px solid rgba(168,85,247,.28);
+    }
+
+    /* titoli sezioni */
+    .section-title{margin-top:18px}
+
+    /* griglia di base (eredita da styles.css): garantiamo buon wrap */
+    .grid{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+  </style>
 </head>
 <body>
   <div class="container">
 
-    <!-- NAV semplificata: logo a sinistra, titolo grande centrato -->
+    <!-- NAV -->
     <div class="nav">
       <div class="brand">
         <img src="/static/img/logo.svg" alt="Logo" class="logo">
@@ -24,63 +69,116 @@
       </div>
     </div>
 
-    <!-- SEZIONE: STRUMENTI -->
+    <!-- STATUS -->
+    <h2 class="section-title">Status</h2>
+    <div class="grid">
+      <div class="card card--status">
+        <h2>Stato macchina <span id="host" class="muted-small"></span>
+          <a class="btn secondary right" href="#" onclick="refreshStatus();return false;">Aggiorna</a>
+        </h2>
+
+        <div class="status-grid" style="margin-top:6px">
+
+          <!-- KPI -->
+          <div class="kpi">
+            <b>Uptime</b>
+            <div class="muted" id="uptime">-</div>
+          </div>
+
+          <div class="kpi">
+            <b>Spazio disco</b>
+            <div class="muted-small"><span id="disk-used">-</span> / <span id="disk-total">-</span></div>
+            <div class="bar"><span id="disk-bar" style="width:0%"></span></div>
+          </div>
+
+          <div class="kpi">
+            <b>Servizi</b>
+            <div id="svc" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+          </div>
+
+          <div class="kpi">
+            <b>Interfacce &amp; IP</b>
+            <div id="ifaces" class="ipbox"></div>
+          </div>
+
+        </div>
+
+        <div class="muted-small" style="margin-top:10px">
+          dumpcap caps: <span id="caps" class="mono">-</span>
+          <span class="right">Ultimo aggiornamento: <span id="ts">-</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- STRUMENTI -->
     <h2 class="section-title">Strumenti</h2>
     <div class="grid">
-      <div class="card">
-        <h2>SmokePing</h2>
+      <div class="card card--tool card--smokeping">
+        <h2>
+          <img class="tool-icon" src="/static/img/smokeping.svg" alt="SmokePing" onerror="this.style.display='none'">
+          SmokePing
+        </h2>
         <p class="muted">Grafici di latenza e perdita pacchetti.</p>
         <a class="btn" href="/smokeping/">Apri SmokePing</a>
       </div>
-      <div class="card">
-        <h2>Packet Capture</h2>
+
+      <div class="card card--tool card--pcap">
+        <h2>
+          <img class="tool-icon" src="/static/img/wireshark.svg" alt="Packet Capture" onerror="this.style.display='none'">
+          Packet Capture
+        </h2>
         <p class="muted">Cattura pacchetti (pcapng) da un’interfaccia e scarica il file. Analisi rapida integrata.</p>
         <a class="btn" href="/pcap">Apri Packet Capture</a>
       </div>
     </div>
 
-    <!-- SEZIONE: IMPOSTAZIONI -->
+    <!-- IMPOSTAZIONI -->
     <h2 class="section-title">Impostazioni</h2>
     <div class="grid">
-      <div class="card">
+      <div class="card card--settings">
         <h2>WAN</h2>
         <p class="muted">Configura DHCP, Statico o PPPoE sull’interfaccia WAN.</p>
         <a class="btn" href="/wan">Apri WAN</a>
       </div>
-      <div class="card">
+
+      <div class="card card--settings">
         <h2>LAN</h2>
         <p class="muted">Configura IP sulla LAN usata per le diagnosi.</p>
         <a class="btn" href="/lan">Apri LAN</a>
       </div>
-      <div class="card">
+
+      <div class="card card--settings">
         <h2>SmokePing Admin</h2>
         <p class="muted">Aggiungi/rimuovi target, cambia probe, riavvia servizio.</p>
         <a class="btn" href="/sp-admin">Apri SP&nbsp;Admin</a>
       </div>
-      <div class="card">
+
+      <div class="card card--settings">
         <h2>Impostazioni Aggiuntive</h2>
         <p class="muted">Cambia la porta web (default 8080) e altre preferenze.</p>
         <a class="btn" href="/settings">Apri Impostazioni Aggiuntive</a>
       </div>
-      <div class="card">
+
+      <div class="card card--settings">
         <h2>Utenti &amp; accesso</h2>
         <p class="muted">Gestisci utenti, ruoli e password.</p>
         <a class="btn" href="/auth/users">Apri gestione utenti</a>
       </div>
-      <div class="card">
+
+      <div class="card card--settings">
         <h2>Impostazioni Capture</h2>
         <p class="muted">Parametri di cattura e retention file.</p>
-        <a class="btn" href="/pcap/settings">Apri impostazioni capture</a> 
+        <a class="btn" href="/pcap/settings">Apri impostazioni capture</a>
       </div>
 
       {% if user %}
-      <div class="card">
+      <div class="card card--settings">
         <h2>Sessione</h2>
         <p class="muted">Utente corrente: <b>{{ user }}</b>.</p>
         <a class="btn" href="/auth/logout?next=/">Logout</a>
       </div>
       {% else %}
-      <div class="card">
+      <div class="card card--settings">
         <h2>Accesso</h2>
         <p class="muted">Accedi per usare gli strumenti protetti.</p>
         <a class="btn" href="/auth/login">Vai al login</a>
@@ -90,5 +188,87 @@
 
     <div class="footer">© TestMachine – Debian 12</div>
   </div>
+
+  <script>
+    function humanBytes(b){
+      if(b==null) return "-";
+      const u=["B","KB","MB","GB","TB"]; let i=0, v=Number(b);
+      while(v>=1024 && i<u.length-1){v/=1024;i++}
+      return v.toFixed(1)+" "+u[i];
+    }
+    function fmtUptime(sec){
+      if(!sec && sec!==0) return "-";
+      sec = Math.floor(sec);
+      const d = Math.floor(sec/86400); sec%=86400;
+      const h = Math.floor(sec/3600);  sec%=3600;
+      const m = Math.floor(sec/60);
+      const parts=[];
+      if(d) parts.push(d+"g");
+      if(h||parts.length) parts.push(h+"h");
+      parts.push(m+"m");
+      return parts.join(" ");
+    }
+    function pill(label, state){
+      const map = {active:"ok", reloading:"warn", inactive:"bad", failed:"bad", activating:"warn", deactivating:"warn"};
+      const cls = map[state] || "bad";
+      return "<span class='pill'><span class='dot "+cls+"'></span>"+label+"</span>";
+    }
+
+    async function refreshStatus(){
+      try{
+        const r = await fetch("/status/summary");
+        const js = await r.json();
+
+        document.getElementById("host").textContent = js.hostname || "";
+        document.getElementById("uptime").textContent = fmtUptime(js.uptime_s);
+
+        const total = js.disk?.total ?? 0;
+        const used  = js.disk?.used ?? 0;
+        const pct = total? Math.min(100, Math.max(0, Math.round(used/total*100))) : 0;
+        document.getElementById("disk-total").textContent = humanBytes(total);
+        document.getElementById("disk-used").textContent  = humanBytes(used) + " ("+pct+"%)";
+        document.getElementById("disk-bar").style.width = pct + "%";
+
+        // servizi
+        const svc = js.services || {};
+        const svcEl = document.getElementById("svc");
+        svcEl.innerHTML = "";
+        for(const [name, st] of Object.entries(svc)){
+          const label = name.replace(/^netprobe-api$/,"API")
+                            .replace(/^apache2$/,"Apache")
+                            .replace(/^smokeping$/,"SmokePing")
+                            .replace(/^systemd-timesyncd$/,"Timesyncd");
+          const wrap = document.createElement("div");
+          wrap.innerHTML = pill(label, st);
+          svcEl.appendChild(wrap.firstChild);
+        }
+
+        // interfacce/IP
+        const ifaces = js.interfaces || {};
+        const ifEl = document.getElementById("ifaces");
+        ifEl.innerHTML = "";
+        const keys = Object.keys(ifaces).sort();
+        if(keys.length===0){ ifEl.textContent="Nessuna interfaccia attiva"; }
+        for(const k of keys){
+          const o = ifaces[k];
+          const box = document.createElement("div");
+          box.innerHTML =
+            "<div class='addr'><b>"+k+"</b></div>" +
+            (o.ipv4||[]).map(a=>"<div class='addr mono'>IPv4: "+a+"</div>").join("") +
+            (o.ipv6||[]).map(a=>"<div class='addr mono'>IPv6: "+a+"</div>").join("");
+          ifEl.appendChild(box);
+        }
+
+        document.getElementById("caps").textContent = js.dumpcap_caps || "n/d";
+        const ts = new Date((js.time||Date.now())*1000);
+        document.getElementById("ts").textContent = ts.toLocaleString();
+      }catch(e){
+        // in caso di errore, non rompiamo la UI
+      }
+    }
+
+    refreshStatus();
+    setInterval(refreshStatus, 5000);
+  </script>
 </body>
 </html>

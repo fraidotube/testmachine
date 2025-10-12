@@ -1,3 +1,4 @@
+# /opt/netprobe/app/main.py
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -8,7 +9,7 @@ from routes.wan import router as wan_router
 from routes.lan import router as lan_router
 from routes.settings import router as settings_router
 from routes.pcap import router as pcap_router
-
+from routes.status import router as status_router  # <-- NEW
 
 # Auth
 from routes.auth import router as auth_router, verify_session_cookie, _load_users  # _load_users per leggere i ruoli
@@ -21,13 +22,14 @@ templates = Jinja2Templates(directory="/opt/netprobe/app/templates")
 
 # --------- RBAC: prefisso -> ruoli ammessi ----------
 PATH_ROLES = {
-    "/sp-admin": ["admin"],                    # pannello SmokePing admin
-    "/settings": ["admin"],                    # impostazioni aggiuntive
-    "/wan":      ["admin", "operator"],        # config rete WAN
-    "/lan":      ["admin", "operator"],        # config rete LAN
+    "/sp-admin": ["admin"],                        # pannello SmokePing admin
+    "/settings": ["admin"],                        # impostazioni aggiuntive
+    "/wan":      ["admin", "operator"],            # config rete WAN
+    "/lan":      ["admin", "operator"],            # config rete LAN
     "/smokeping":["admin", "operator", "viewer"],  # fruizione grafici
-    "/auth":     ["admin"],                    # gestione utenti/ruoli 
-    "/pcap":     ["admin", "operator"],        # cattura pacchetti
+    "/auth":     ["admin"],                        # gestione utenti/ruoli 
+    "/pcap":     ["admin", "operator"],            # cattura pacchetti
+    # "/status" NON è mappato -> libero (solo lettura per homepage)
 }
 
 # Percorsi sempre liberi
@@ -53,7 +55,7 @@ async def auth_gatekeeper(request: Request, call_next):
             break
 
     if not protected:
-        # non mappato: lascia passare (oppure metti default=login)
+        # non mappato: lascia passare (es. /status/summary)
         return await call_next(request)
 
     # richiede login
@@ -73,22 +75,18 @@ async def auth_gatekeeper(request: Request, call_next):
 
 # --------- routes base ---------
 @app.get("/", response_class=HTMLResponse)
-
 def index(request: Request):
     from routes.auth import verify_session_cookie
-    # mostra il link Logout se c'è una sessione valida
-    user = verify_session_cookie(request)
+    user = verify_session_cookie(request)  # mostra link Logout se c’è sessione valida
     return templates.TemplateResponse("index.html", {"request": request, "user": user})
-
-
 
 # Registra i router
 app.include_router(wan_router, prefix="/wan")
 app.include_router(lan_router, prefix="/lan")
 app.include_router(settings_router, prefix="/settings")
 app.include_router(auth_router)
-app.include_router(pcap_router)  # ha già prefix="/pcap"
-
+app.include_router(pcap_router)          # ha già prefix="/pcap"
+app.include_router(status_router)        # NEW: espone /status/summary
 
 # (Opzionale) pannello admin Smokeping
 try:

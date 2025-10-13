@@ -8,10 +8,13 @@ def head(title:str)->str:
     return (
         "<!doctype html><html><head><meta charset='utf-8'/>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
-        f"<title>{title}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>"
-        "<div class='container'><div class='nav'><div class='brand'>"
-        "<img src='/static/img/logo.svg' alt='Logo' class='logo'><span>TestMachine</span></div>"
-        "<div class='links'><a href='/'>Home</a></div></div>"
+        "<title>{escape(title)}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>"
+        "<div class='container'>"
+        "<div class='nav'>"
+          "<div class='brand'><img src='/static/img/logo.svg' class='logo'/></div>"
+          "<div class='title-center'>TestMachine</div>"
+          "<div class='spacer'><a class='btn secondary' href='/'>Home</a></div>"
+        "</div>"
     )
 
 # ---- Rilevamento interfacce (stessa logica di WAN) -------------------------

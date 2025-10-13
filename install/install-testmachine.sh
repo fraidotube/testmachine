@@ -12,11 +12,11 @@ step(){ echo -e "\n== $* =="; }
 APP_DIR=/opt/netprobe
 APP_USER=netprobe
 APP_GROUP=netprobe
-API_PORT=9000                         # uvicorn
-WEB_PORT=${WEB_PORT:-8080}            # Apache (puoi esportare WEB_PORT=xxxx prima di lanciare)
+API_PORT=9000
+WEB_PORT=${WEB_PORT:-8080}
 
 # --- pacchetti base ---
-step "APT update & install"
+step "APT update & install base"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -45,14 +45,15 @@ else
 fi
 
 # --- venv + deps ---
-step "Python venv"
+step "Python venv + dipendenze"
 install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" "${APP_DIR}/venv"
 python3 -m venv "${APP_DIR}/venv"
 "${APP_DIR}/venv/bin/pip" install --upgrade pip
 if [[ -f "${APP_DIR}/requirements.txt" ]]; then
   "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
 else
-  "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart
+  # includo anche speedtest-cli (fallback Python)
+  "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart speedtest-cli
 fi
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
 
@@ -83,8 +84,7 @@ a2enmod proxy proxy_http headers rewrite cgid >/dev/null
 
 step "Apache porta ${WEB_PORT}"
 sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
-grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || \
-  echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
+grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 
 step "Site testmachine.conf"
 cat >/etc/apache2/sites-available/testmachine.conf <<EOF
@@ -93,13 +93,11 @@ cat >/etc/apache2/sites-available/testmachine.conf <<EOF
   ErrorLog  \${APACHE_LOG_DIR}/testmachine-error.log
   CustomLog \${APACHE_LOG_DIR}/testmachine-access.log combined
 
-  # Reverse proxy verso FastAPI
   ProxyPreserveHost On
   RequestHeader set X-Forwarded-Proto "http"
   ProxyPass        / http://127.0.0.1:${API_PORT}/
   ProxyPassReverse / http://127.0.0.1:${API_PORT}/
 
-  # Esclusione SmokePing dal proxy: usa la sua conf di Apache
   <Location /smokeping/>
     ProxyPass !
     Require all granted
@@ -112,37 +110,12 @@ a2ensite testmachine.conf >/dev/null || true
 step "SmokePing: conf Apache + permessi"
 a2enconf smokeping >/dev/null || true
 
-
-# --- Packet capture (dumpcap non-root via capability) ---
+# --- Packet capture: capability dumpcap ---
 step "Packet capture: abilita dumpcap non-root"
-# abilita la capability per catturare pacchetti senza root
 setcap cap_net_raw,cap_net_admin+eip /usr/bin/dumpcap || true
 getcap /usr/bin/dumpcap || true
 
-# se esiste il gruppo wireshark, aggiungi netprobe (alcune distro lo usano per i permessi di dumpcap)
-if getent group wireshark >/dev/null 2>&1; then
-  usermod -aG wireshark "${APP_USER}" || true
-fi
-
-# seed configurazione PCAP (se non presente)
-install -d -m 0755 /etc/netprobe
-if [[ ! -s /etc/netprobe/pcap.json ]]; then
-  cat >/etc/netprobe/pcap.json <<'JSON'
-{
-  "duration_max": 3600,
-  "quota_gb": 5,
-  "policy": "rotate",
-  "poll_ms": 1000,
-  "allow_bpf": true
-}
-JSON
-  chmod 0644 /etc/netprobe/pcap.json
-fi
-
-
-
-
-# gruppi/permessi: CGI (www-data) e demone (smokeping) devono poter leggere/scrivere
+# --- gruppi/permessi per file e config ---
 usermod -aG "${APP_GROUP}" smokeping || true
 usermod -aG "${APP_GROUP}" www-data  || true
 
@@ -153,7 +126,7 @@ chmod 0660 /etc/smokeping/config.d/* 2>/dev/null || true
 chown -R smokeping:"${APP_GROUP}" /var/lib/smokeping
 chmod 2770 /var/lib/smokeping
 
-# Targets default (vuoti ma validi)
+# Targets default
 if [[ ! -s /etc/smokeping/config.d/Targets ]]; then
   cat >/etc/smokeping/config.d/Targets <<'EOF'
 + TestMachine
@@ -165,48 +138,56 @@ EOF
   chmod 0660 /etc/smokeping/config.d/Targets
 fi
 
-# --- SUDOERS: nmcli + NTP + Apache/Smokeping + install ---
+# --- SUDOERS ---
 step "Sudoers per netprobe"
 cat >/etc/sudoers.d/netprobe-ops <<'EOF'
 Defaults:netprobe !requiretty
-
-# Copie file generate dalla webapp (porta, vhost, timesyncd)
 Cmnd_Alias NP_COPY = \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/ports.conf, \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/sites-available/testmachine.conf, \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/systemd/timesyncd.conf
-
-# Reload/restart servizi usati dalla webapp
 Cmnd_Alias NP_SVC = \
   /bin/systemctl reload apache2, /usr/bin/systemctl reload apache2, \
   /bin/systemctl restart apache2, /usr/bin/systemctl restart apache2, \
   /bin/systemctl reload smokeping, /usr/bin/systemctl reload smokeping, \
   /bin/systemctl try-reload-or-restart systemd-timesyncd, /usr/bin/systemctl try-reload-or-restart systemd-timesyncd
-
-# NTP / timezone
-Cmnd_Alias NP_TIME = \
-  /usr/bin/timedatectl *, \
-  /bin/timedatectl *
-
-# NetworkManager (WAN/LAN)
-Cmnd_Alias NP_NM = \
-  /usr/bin/nmcli *
-
+Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
+Cmnd_Alias NP_NM = /usr/bin/nmcli *
 netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM
 EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -c
 
-# --- Workdir temporaneo dell’app ---
-step "Workdir temporaneo dell’app"
+# --- Workdir app & PCAP & SPEEDTEST ---
+step "Workdir app + PCAP + SPEEDTEST"
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe /var/lib/netprobe/tmp
-
-# directory per i file PCAP
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/pcap
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/speedtest
+# seed file stato speedtest
+if [[ ! -f /var/lib/netprobe/speedtest/state.json ]]; then
+  cat >/var/lib/netprobe/speedtest/state.json <<'JSON'
+{"pid": null, "started": null, "result": null, "tool": null}
+JSON
+  chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/speedtest/state.json
+  chmod 0660 /var/lib/netprobe/speedtest/state.json
+fi
 
+# --- Speedtest (Ookla CLI) + fallback Python ---
+step "Installazione Ookla Speedtest CLI (repo packagecloud)"
+if ! command -v speedtest >/dev/null 2>&1; then
+  # aggiunge repo; se offline non rompe l'installer
+  curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash || true
+  apt-get update || true
+  apt-get install -y speedtest || true
+fi
+# fallback: comunque abbiamo il modulo Python in venv (già installato sopra)
+if command -v speedtest >/dev/null 2>&1; then
+  echo "Ookla speedtest: $(speedtest --version 2>&1 | head -n1 || true)"
+else
+  echo "Ookla speedtest non installato: userò il fallback Python (speedtest-cli)."
+fi
 
-
-# --- Utenti/app default ---
+# --- Seed utenti ---
 step "Seed /etc/netprobe/users.json (admin/admin)"
 install -d -m 0770 -o root -g "${APP_GROUP}" /etc/netprobe
 if [[ ! -s /etc/netprobe/users.json ]]; then
@@ -225,7 +206,6 @@ fi
 step "Riavvio servizi"
 systemctl restart smokeping || true
 systemctl reload apache2 || systemctl restart apache2
-systemctl restart netprobe-api || true
 
 # --- check ---
 step "Check finali"
@@ -234,5 +214,10 @@ systemctl is-active --quiet smokeping && echo "SmokePing OK"
 apachectl -t || true
 echo -n "HTTP / (via :${WEB_PORT}): "; curl -sI "http://127.0.0.1:${WEB_PORT}/" | head -n1 || true
 echo -n "HTTP /smokeping/ (via Apache): "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping/" | head -n1 || true
+if command -v speedtest >/dev/null 2>&1; then
+  echo "Speedtest CLI presente."
+else
+  echo "Speedtest CLI assente; fallback Python disponibile (speedtest-cli in venv)."
+fi
 
 echo -e "\nFATTO. Log: ${LOG}"

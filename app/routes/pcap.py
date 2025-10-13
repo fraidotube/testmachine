@@ -236,12 +236,15 @@ def _top_ports(path:Path, n:int=10):
 # ---------- HTML helpers ----------
 def _page_head(title:str)->str:
     return (
-        "<!doctype html><html><head><meta charset='utf-8'/>"
+         "<!doctype html><html><head><meta charset='utf-8'/>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
         f"<title>{escape(title)}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>"
-        "<div class='container'><div class='nav'><div class='brand'>"
-        "<img src='/static/img/logo.svg' class='logo'/><span>TestMachine</span>"
-        "</div><div class='links'><a href='/'>Home</a></div></div>"
+        "<div class='container'>"
+        "<div class='nav'>"
+          "<div class='brand'><img src='/static/img/logo.svg' class='logo'/></div>"
+          "<div class='title-center'>TestMachine</div>"
+          "<div class='spacer'><a class='btn secondary' href='/'>Home</a></div>"
+        "</div>"
     )
 
 # ---------- Pagine ----------

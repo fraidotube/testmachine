@@ -198,6 +198,8 @@ code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mo
   background: linear-gradient(180deg, rgba(37,99,235,.20), rgba(37,99,235,.10));
   border-color: rgba(37,99,235,.30);
 }
+.card.tool.speedtest{ border:1px solid rgba(147,197,253,.25); background:linear-gradient(180deg, rgba(30,64,175,.18), rgba(2,6,23,.05)); }
+.card .emoji{font-size:1.1rem; opacity:.9}
 .card-settings{
   background: linear-gradient(180deg, rgba(99,102,241,.16), rgba(99,102,241,.10));
   border-color: rgba(99,102,241,.26);

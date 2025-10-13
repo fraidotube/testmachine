@@ -154,10 +154,19 @@ def _current_user(request: Request):
 
 def _nav():
     return (
+        "<!doctype html><html><head><meta charset='utf-8'/>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
+        "<title>{escape(title)}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>"
+        "<div class='container'>"
         "<div class='nav'>"
-        "  <div class='brand'><img src='/static/img/logo.svg' class='logo' alt='Logo'><span>TestMachine</span></div>"
-        "  <div class='links'><a href='/'>Home</a> <a href='/auth/logout?next=/'>Logout</a></div>"
-        "</div>"
+          "<div class='brand'><img src='/static/img/logo.svg' class='logo'/></div>"
+          "<div class='title-center'>TestMachine</div>"
+          "<div class='spacer'><a class='btn secondary' href='/'>Home</a></div>"
+          "<div class='spacer'><a class='btn secondary' href=href='/auth/logout?next=/'>Logout</a></div>"
+        "</div>"    
+    
+    
+        
     )
 
 # ---------- Routes tecniche ----------

@@ -10,6 +10,8 @@ from routes.lan import router as lan_router
 from routes.settings import router as settings_router
 from routes.pcap import router as pcap_router
 from routes.status import router as status_router  # <-- NEW
+from routes.speedtest import router as speedtest_router
+
 
 # Auth
 from routes.auth import router as auth_router, verify_session_cookie, _load_users  # _load_users per leggere i ruoli
@@ -29,6 +31,7 @@ PATH_ROLES = {
     "/smokeping":["admin", "operator", "viewer"],  # fruizione grafici
     "/auth":     ["admin"],                        # gestione utenti/ruoli 
     "/pcap":     ["admin", "operator"],            # cattura pacchetti
+    "/speedtest":["admin", "operator", "viewer"],  # speedtest
     # "/status" NON è mappato -> libero (solo lettura per homepage)
 }
 
@@ -87,6 +90,8 @@ app.include_router(settings_router, prefix="/settings")
 app.include_router(auth_router)
 app.include_router(pcap_router)          # ha già prefix="/pcap"
 app.include_router(status_router)        # NEW: espone /status/summary
+app.include_router(speedtest_router)
+
 
 # (Opzionale) pannello admin Smokeping
 try:

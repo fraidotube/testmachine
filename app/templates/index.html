@@ -36,6 +36,10 @@
       background: linear-gradient(160deg, rgba(14,165,233,.25), rgba(14,165,233,.08));
       border: 1px solid rgba(14,165,233,.35);
     }
+    .card--speedtest{
+      background: linear-gradient(160deg, rgba(16,185,129,.25), rgba(5,150,105,.10));
+      border: 1px solid rgba(16,185,129,.35);
+    }
     .tool-icon{width:26px;height:26px;opacity:.95}
 
     /* ---------- SETTINGS CARDS UNIFORME ---------- */
@@ -76,6 +80,7 @@
         <h2>Stato macchina <span id="host" class="muted-small"></span>
           <a class="btn secondary right" href="#" onclick="refreshStatus();return false;">Aggiorna</a>
         </h2>
+        <hr>
 
         <div class="status-grid" style="margin-top:6px">
 
@@ -110,9 +115,9 @@
       </div>
     </div>
 
-    <!-- STRUMENTI -->
+   <!-- STRUMENTI -->
     <h2 class="section-title">Strumenti</h2>
-    <div class="grid">
+    <div class="grid" style="margin-bottom:6px">
       <div class="card card--tool card--smokeping">
         <h2>
           <img class="tool-icon" src="/static/img/smokeping.svg" alt="SmokePing" onerror="this.style.display='none'">
@@ -127,10 +132,21 @@
           <img class="tool-icon" src="/static/img/wireshark.svg" alt="Packet Capture" onerror="this.style.display='none'">
           Packet Capture
         </h2>
-        <p class="muted">Cattura pacchetti (pcapng) da un’interfaccia e scarica il file. Analisi rapida integrata.</p>
+        <p class="muted">Cattura pacchetti (pcapng) e scarica il file. Analisi rapida integrata.</p>
         <a class="btn" href="/pcap">Apri Packet Capture</a>
       </div>
+
+      <!-- NEW: Speedtest nella stessa griglia, con un piccolo margine-top per separarla visivamente se va a capo -->
+      <div class="card card--tool card--speedtest" style="margin-top:6px">
+        <h2>
+          <img class="tool-icon" src="/static/img/speedtest.svg" alt="Speedtest" onerror="this.style.display='none'">
+          Speedtest
+        </h2>
+        <p class="muted">Misura ping, download e upload.</p>
+        <a class="btn" href="/speedtest">Apri Speedtest</a>
+      </div>
     </div>
+
 
     <!-- IMPOSTAZIONI -->
     <h2 class="section-title">Impostazioni</h2>

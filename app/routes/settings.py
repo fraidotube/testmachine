@@ -2,6 +2,7 @@ import os, re
 from fastapi import APIRouter, Request, Form, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from util.shell import run
+from html import escape
 
 router = APIRouter()
 

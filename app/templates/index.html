@@ -44,8 +44,8 @@
 
     /* ---------- SETTINGS CARDS UNIFORME ---------- */
     .card--settings{
-      background: linear-gradient(180deg, rgba(168,85,247,.18), rgba(168,85,247,.06));
-      border: 1px solid rgba(168,85,247,.28);
+      background: linear-gradient(180deg, rgba(255,255,255,.18), rgba(59,130,246,.06));
+      border: 1px solid rgba(255,255,255,.28);
     }
 
     /* titoli sezioni */
@@ -64,17 +64,12 @@
         <img src="/static/img/logo.svg" alt="Logo" class="logo">
       </div>
       <div class="title-center">TestMachine</div>
-      <div class="spacer">
-        {% if user %}
-          <a href="/auth/logout?next=/">Logout</a>
-        {% else %}
-          <a href="/auth/login">Login</a>
-        {% endif %}
-      </div>
+      <div class='spacer'><a class='btn secondary' href=href='/auth/logout?next=/'>Logout</a></div>
+      
     </div>
 
     <!-- STATUS -->
-    <h2 class="section-title">Status</h2>
+    <h2 class="section-title"></h2>
     <div class="grid">
       <div class="card card--status">
         <h2>Stato macchina <span id="host" class="muted-small"></span>
@@ -114,7 +109,7 @@
         </div>
       </div>
     </div>
-
+    <hr>
    <!-- STRUMENTI -->
     <h2 class="section-title">Strumenti</h2>
     <div class="grid" style="margin-bottom:6px">
@@ -146,8 +141,11 @@
         <a class="btn" href="/speedtest">Apri Speedtest</a>
       </div>
     </div>
+    
+    
 
 
+    <hr>
     <!-- IMPOSTAZIONI -->
     <h2 class="section-title">Impostazioni</h2>
     <div class="grid">

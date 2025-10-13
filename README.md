@@ -70,7 +70,7 @@ Esegui come **root**:
     export WEB_PORT=8080
     
     # scarica ed esegui l'installer
-    curl -fsSL https://raw.githubusercontent.com/<TUO_USER_O_ORG>/testmachine/main/install/install-testmachine.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/fraidotube/testmachine/main/install/install-testmachine.sh | bash
 
 Cosa fa lo script:
 

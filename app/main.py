@@ -11,7 +11,7 @@ from routes.settings import router as settings_router
 from routes.pcap import router as pcap_router
 from routes.status import router as status_router  # <-- NEW
 from routes.speedtest import router as speedtest_router
-
+from routes.voip import router as voip_router
 
 
 # Auth
@@ -92,7 +92,7 @@ app.include_router(auth_router)
 app.include_router(pcap_router)          # ha già prefix="/pcap"
 app.include_router(status_router)        # NEW: espone /status/summary
 app.include_router(speedtest_router)
-
+app.include_router(voip_router)  # ha già prefix="/voip"
 
 
 # (Opzionale) pannello admin Smokeping

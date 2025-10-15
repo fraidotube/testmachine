@@ -15,33 +15,24 @@ APP_GROUP=netprobe
 API_PORT=9000
 WEB_PORT=${WEB_PORT:-8080}
 
-# --- APT: abilita contrib/non-free/non-free-firmware PRIMA di ogni update ---
-step "Abilito componenti APT: contrib non-free non-free-firmware"
+# --- APT: assicurati che ci siano ESATTAMENTE le tre righe indicate (main contrib non-free) ---
+step "APT: assicurazione repository standard (main contrib non-free)"
 . /etc/os-release
 CODENAME="${VERSION_CODENAME:-bookworm}"
 SRC=/etc/apt/sources.list
-if [[ -f "$SRC" ]]; then
-  cp -n "$SRC" "${SRC}.bak.$(date +%F_%H%M%S)" || true
-  tmp=$(mktemp)
-  awk '
-    BEGIN{OFS=" "}
-    /^deb\s+http/ {
-      line=$0
-      if (line !~ / main/) line=line" main"
-      if (line !~ / contrib/) line=line" contrib"
-      if (line !~ / non-free[^-]/) line=line" non-free"
-      if (line !~ / non-free-firmware/) line=line" non-free-firmware"
-      print line; next
-    }
-    {print}
-  ' "$SRC" > "$tmp" && mv "$tmp" "$SRC"
-else
-  cat >"$SRC" <<EOF
-deb http://deb.debian.org/debian $CODENAME main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian $CODENAME-updates main contrib non-free non-free-firmware
-deb http://security.debian.org/debian-security $CODENAME-security main contrib non-free non-free-firmware
-EOF
-fi
+[[ -f "$SRC" ]] || touch "$SRC"
+cp -n "$SRC" "${SRC}.bak.$(date +%F_%H%M%S)" || true
+
+need1="deb http://deb.debian.org/debian ${CODENAME} main contrib non-free"
+need2="deb http://security.debian.org/debian-security ${CODENAME}-security main contrib non-free"
+need3="deb http://deb.debian.org/debian ${CODENAME}-updates main contrib non-free"
+
+grep -qxF "$need1" "$SRC" || echo "$need1" >> "$SRC"
+grep -qxF "$need2" "$SRC" || echo "$need2" >> "$SRC"
+grep -qxF "$need3" "$SRC" || echo "$need3" >> "$SRC"
+
+# Nota: NON aggiungiamo 'non-free-firmware' qui perché l'utente ha confermato
+# che il set corretto per il suo ambiente è solo main/contrib/non-free.
 
 # --- pacchetti base ---
 step "APT update & install base"
@@ -57,8 +48,18 @@ apt-get install -y --no-install-recommends \
 
 # --- pacchetti Net Mapper (nmap/arp-scan/dns/snmp/bonjour/oui) ---
 step "Install Net Mapper deps"
+# Su Debian 12 'dnsutils' è transizionale -> usiamo 'bind9-dnsutils'.
 apt-get install -y --no-install-recommends \
-  nmap arp-scan dnsutils snmp snmp-mibs-downloader avahi-utils ieee-data
+  nmap arp-scan bind9-dnsutils snmp avahi-utils ieee-data
+# 'snmp-mibs-downloader' viene installato SOLO se disponibile nei repo configurati
+if candidate="$(apt-cache policy snmp-mibs-downloader 2>/dev/null | awk '/Candidate:/ {print $2}')"; then
+  if [[ -n "$candidate" && "$candidate" != "(none)" ]]; then
+    step "Installo snmp-mibs-downloader (opzionale)"
+    apt-get install -y --no-install-recommends snmp-mibs-downloader || true
+  else
+    echo "snmp-mibs-downloader non disponibile su ${CODENAME}; procedo senza."
+  fi
+fi
 
 # --- SNMP MIBs: abilita caricamento (Debian ha spesso 'mibs :' disabilitante) ---
 step "SNMP: abilito caricamento MIB (commento 'mibs :')"
@@ -124,7 +125,7 @@ a2enmod proxy proxy_http headers rewrite cgid >/dev/null
 
 step "Apache porta ${WEB_PORT}"
 sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
-grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
+grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 
 step "Site testmachine.conf"
 cat >/etc/apache2/sites-available/testmachine.conf <<EOF
@@ -188,7 +189,7 @@ EOF
   chmod 0660 /etc/smokeping/config.d/Targets
 fi
 
-# --- Workdir app & PCAP & SPEEDTEST & VOIP & NETMAP ---
+# --- Workdir app + PCAP + SPEEDTEST + VOIP + NETMAP ---
 step "Workdir app + PCAP + SPEEDTEST + VOIP + NETMAP"
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe /var/lib/netprobe/tmp
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/pcap

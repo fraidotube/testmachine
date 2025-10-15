@@ -60,13 +60,19 @@
 
     <!-- NAV -->
     <div class="nav">
-      <div class="brand">
-        <img src="/static/img/logo.svg" alt="Logo" class="logo">
+     <div class="brand">
+       <img src="/static/img/logo.svg" alt="Logo" class="logo">
+     </div>
+     <div class="title-center">TestMachine</div>
+
+      <div class="spacer">
+          {% if user %}
+      <a class="btn secondary" href="/auth/logout?next=/">Logout</a>
+          {% else %}
+      <a class="btn secondary" href="/auth/login?next=/">Login</a>
+          {% endif %}
       </div>
-      <div class="title-center">TestMachine</div>
-      <div class='spacer'><a class='btn secondary' href=href='/auth/logout?next=/'>Logout</a></div>
-      
-    </div>
+      </div>
 
     <!-- STATUS -->
     <h2 class="section-title"></h2>
@@ -83,6 +89,16 @@
           <div class="kpi">
             <b>Uptime</b>
             <div class="muted" id="uptime">-</div>
+            <b>Sessione</b>
+            {% if user %}
+              <div class="muted">
+                <span class="pill"><span class="dot ok"></span> {{ user }}</span>
+              </div>
+            {% else %}
+              <div class="muted">
+                <span class="pill"><span class="dot bad"></span> Accesso non effettuato</span>
+              </div>
+            {% endif %}
           </div>
 
           <div class="kpi">
@@ -139,6 +155,15 @@
         </h2>
         <p class="muted">Misura ping, download e upload.</p>
         <a class="btn" href="/speedtest">Apri Speedtest</a>
+      </div>
+      <!-- VoIP -->
+      <div class="card card--tool card--voip" style="margin-top:6px">
+        <h2>
+          <img class="tool-icon" src="/static/img/speedtest.svg" alt="VoIP" onerror="this.style.display='none'">
+          VoIP
+        </h2>
+        <p class="muted">Tool di analisi VoIP.</p>
+        <a class="btn" href="/voip">Apri VoIP Tool</a>
       </div>
     </div>
     

@@ -5,6 +5,7 @@ from pathlib import Path
 import os, json, time, subprocess, re, signal, shlex, tempfile
 from typing import List, Dict, Any, Tuple, Optional
 from routes.auth import verify_session_cookie, _load_users
+from statistics import mean
 
 router = APIRouter(prefix="/voip", tags=["voip"])
 
@@ -158,11 +159,28 @@ def _save_cfg(cfg:dict):
     tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     os.replace(tmp, CFG_PATH)
 
+def _validate_bpf(iface: str, bpf: str) -> tuple[bool, str]:
+    """
+    Prova a compilare/avviare dumpcap per 1s su /dev/null.
+    Ritorna (ok, stderr).
+    """
+    rc, out, err = _run([
+        "/usr/bin/dumpcap", "-i", iface, "-P",
+        "-a", "duration:1", "-s", "1", "-f", bpf, "-w", "/dev/null"
+    ], timeout=10)
+    return (rc == 0), (err or out or "")
 
 def _default_bpf(cfg:dict)->str:
-    sip_ports = " or ".join([f"port {p}" for p in cfg["sip_ports"]])
+    # SIP può essere UDP 5060/5061 o TCP (TLS) 5061 → usiamo entrambe
+    sip_parts = []
+    for p in cfg["sip_ports"]:
+        sip_parts.append(f"udp port {p}")
+        sip_parts.append(f"tcp port {p}")
+    sip_expr = " or ".join(sip_parts)
     r0, r1 = cfg["rtp_range"]
-    return f"sip or udp portrange {r0}-{r1} or {sip_ports}"
+    # RTP tipicamente UDP nel range
+    rtp_expr = f"udp portrange {r0}-{r1}"
+    return f"({sip_expr}) or ({rtp_expr})"
 
 # --------------- parsing ---------------
 def _mask_user(s: str)->str:
@@ -410,6 +428,12 @@ def voip_page():
       <div>RTP Streams</div><div id='k_rtp'>-</div>
       <div>Indice aggiornato</div><div id='k_built'>-</div>
     </div>
+    <div class='kv' style='margin-top:10px'>
+    <div>MOS medio</div><div id='k_mos'>-</div>
+    <div>Jitter medio</div><div id='k_jit'>-</div>
+    <div>Perdita media</div><div id='k_loss'>-</div>
+    <div>Bitrate medio</div><div id='k_kbps'>-</div>
+  </div>
     <div style='margin-top:8px'>
       <a class='btn small secondary' href='/voip/summary'>Riepilogo veloce</a>
     </div>
@@ -440,6 +464,21 @@ async function stopNow(){
   try{ await fetch('/voip/stop', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'file='+encodeURIComponent(file)}); }catch(e){}
   setTimeout(()=>location.reload(), 600);
 }
+
+async function refreshVoipKpi(){
+  try{
+    const r = await fetch('/voip/kpi'); const js = await r.json();
+    if(js && !js.error){
+      document.getElementById('k_mos').textContent  = (js.mos_avg ?? '-');
+      document.getElementById('k_jit').textContent  = (js.jitter_avg_ms!=null ? js.jitter_avg_ms.toFixed(1)+' ms' : '-');
+      document.getElementById('k_loss').textContent = (js.loss_avg_pct!=null ? js.loss_avg_pct.toFixed(2)+'%' : '-');
+      document.getElementById('k_kbps').textContent = (js.kbps_avg!=null ? js.kbps_avg.toFixed(1)+' kbps' : '-');
+    }
+  }catch(e){}
+}
+setInterval(refreshVoipKpi, __POLL__);
+refreshVoipKpi();
+
 
 async function pollStatus(){
   try{
@@ -558,6 +597,15 @@ def start_capture(request: Request, iface: str = Form(...), duration: int = Form
     fname=f"{ts}_{iface}.pcapng"
     path=CAP_DIR / fname
     cmd=["/usr/bin/dumpcap","-i",iface,"-P","-w",str(path),"-a",f"duration:{duration}","-s","262144"]
+    
+    ok, err = _validate_bpf(iface, bpf)
+    if not ok:
+      esc = escape((err or "").strip())[:400]
+      return HTMLResponse(
+        f"<script>alert('Filtro BPF non valido. Dumpcap ha risposto: {esc}');history.back();</script>",
+        status_code=400
+      )
+      
     if bpf.strip():
         cmd+=["-f", bpf.strip()]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid)
@@ -926,3 +974,27 @@ def settings_save(sip_ports: str = Form(...),
     cfg["ui_poll_ms"]= max(250, min(int(ui_poll_ms), 20000))
     _save_cfg(cfg)
     return RedirectResponse(url="/voip/settings", status_code=303)
+
+
+@router.get("/kpi", response_class=JSONResponse)
+def kpi_latest_capture():
+    p = _latest_pcap()
+    if not p or not p.exists():
+        return {"error": "no_pcap"}
+    stats = _rtp_stats_from_pcap(p)
+    if not stats:
+        return {
+            "rtp_streams": 0,
+            "mos_avg": None, "jitter_avg_ms": None, "loss_avg_pct": None, "kbps_avg": None,
+            "streams": []
+        }
+    def vals(k): return [float(s[k]) for s in stats if s.get(k) is not None]
+    out = {
+        "rtp_streams": len(stats),
+        "mos_avg": round(mean(vals("mos")), 2) if vals("mos") else None,
+        "jitter_avg_ms": round(mean(vals("jitter_ms")), 2) if vals("jitter_ms") else None,
+        "loss_avg_pct": round(mean(vals("loss_pct")), 2) if vals("loss_pct") else None,
+        "kbps_avg": round(mean(vals("kbps")), 2) if vals("kbps") else None,
+        "streams": stats
+    }
+    return out

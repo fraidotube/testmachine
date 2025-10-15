@@ -299,7 +299,7 @@ echo -n "HTTP /smokeping/ (via Apache): "; curl -sI "http://127.0.0.1:${WEB_PORT
 if command -v speedtest >/dev/null 2>&1; then
   echo "Speedtest CLI presente."
 else
-  echo "Speedtest CLI assente; fallback Python disponibile (speedtest-cli in venv)."
+  echo "Speedtest CLI assente ; fallback Python disponibile (speedtest-cli in venv)."
 fi
 
 echo -e "\nFATTO. Log: ${LOG}"

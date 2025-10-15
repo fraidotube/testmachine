@@ -33,6 +33,9 @@ PATH_ROLES = {
     "/auth":     ["admin"],                        # gestione utenti/ruoli 
     "/pcap":     ["admin", "operator"],            # cattura pacchetti
     "/speedtest":["admin", "operator", "viewer"],  # speedtest
+    "/voip/start": ["admin"],
+    "/voip/stop":  ["admin"],
+    "/voip":       ["admin", "operator", "viewer"],  # per la sola pagina/GET
     # "/status" NON è mappato -> libero (solo lettura per homepage)
 }
 

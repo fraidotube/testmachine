@@ -52,7 +52,7 @@ python3 -m venv "${APP_DIR}/venv"
 if [[ -f "${APP_DIR}/requirements.txt" ]]; then
   "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
 else
-  # includo anche speedtest-cli (fallback Python)
+  # include anche speedtest-cli (fallback Python)
   "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart speedtest-cli
 fi
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
@@ -83,6 +83,7 @@ step "Apache moduli"
 a2enmod proxy proxy_http headers rewrite cgid >/dev/null
 
 step "Apache porta ${WEB_PORT}"
+# disabilita la 80 se presente e aggiunge porta custom
 sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
 grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 
@@ -90,6 +91,7 @@ step "Site testmachine.conf"
 cat >/etc/apache2/sites-available/testmachine.conf <<EOF
 <VirtualHost *:${WEB_PORT}>
   ServerName testmachine
+
   ErrorLog  \${APACHE_LOG_DIR}/testmachine-error.log
   CustomLog \${APACHE_LOG_DIR}/testmachine-access.log combined
 
@@ -98,6 +100,7 @@ cat >/etc/apache2/sites-available/testmachine.conf <<EOF
   ProxyPass        / http://127.0.0.1:${API_PORT}/
   ProxyPassReverse / http://127.0.0.1:${API_PORT}/
 
+  # Lascia /smokeping/ servito direttamente da Apache (conf ufficiale)
   <Location /smokeping/>
     ProxyPass !
     Require all granted
@@ -114,6 +117,8 @@ a2enconf smokeping >/dev/null || true
 step "Packet capture: abilita dumpcap non-root"
 setcap cap_net_raw,cap_net_admin+eip /usr/bin/dumpcap || true
 getcap /usr/bin/dumpcap || true
+# Aggiunge anche al gruppo 'wireshark' se presente (Debian lo usa per catture non-root)
+getent group wireshark >/dev/null && usermod -aG wireshark "${APP_USER}" || true
 
 # --- gruppi/permessi per file e config ---
 usermod -aG "${APP_GROUP}" smokeping || true
@@ -158,11 +163,12 @@ EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -c
 
-# --- Workdir app & PCAP & SPEEDTEST ---
-step "Workdir app + PCAP + SPEEDTEST"
+# --- Workdir app & PCAP & SPEEDTEST & VOIP ---
+step "Workdir app + PCAP + SPEEDTEST + VOIP"
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe /var/lib/netprobe/tmp
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/pcap
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/speedtest
+
 # seed file stato speedtest
 if [[ ! -f /var/lib/netprobe/speedtest/state.json ]]; then
   cat >/var/lib/netprobe/speedtest/state.json <<'JSON'
@@ -172,10 +178,47 @@ JSON
   chmod 0660 /var/lib/netprobe/speedtest/state.json
 fi
 
+# --- VOIP: dir e seed index/meta ---
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/voip
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/voip/captures
+
+# meta/index se mancanti
+if [[ ! -f /var/lib/netprobe/voip/captures.json ]]; then
+  echo '{"captures":[]}' >/var/lib/netprobe/voip/captures.json
+  chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/captures.json
+  chmod 0660 /var/lib/netprobe/voip/captures.json
+fi
+if [[ ! -f /var/lib/netprobe/voip/index.json ]]; then
+  echo '{"calls":{}, "rtp_streams":[], "built_ts":0}' >/var/lib/netprobe/voip/index.json
+  chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/index.json
+  chmod 0660 /var/lib/netprobe/voip/index.json
+fi
+
+# config voip.json se assente (valori di default)
+install -d -m 0770 -o root -g "${APP_GROUP}" /etc/netprobe
+if [[ ! -f /etc/netprobe/voip.json ]]; then
+  cat >/etc/netprobe/voip.json <<'JSON'
+{
+  "sip_ports": [5060, 5061],
+  "rtp_range": [10000, 20000],
+  "duration_max": 3600,
+  "quota_gb": 5,
+  "policy": "rotate",
+  "allow_bpf": true,
+  "privacy_mask_user": false,
+  "ui_poll_ms": 1000,
+  "admin_required_actions": ["start","stop","delete"],
+  "default_codec": "PCMU"
+}
+JSON
+  chown root:${APP_GROUP} /etc/netprobe/voip.json
+  chmod 0660 /etc/netprobe/voip.json
+fi
+
 # --- Speedtest (Ookla CLI) + fallback Python ---
 step "Installazione Ookla Speedtest CLI (repo packagecloud)"
 if ! command -v speedtest >/dev/null 2>&1; then
-  # aggiunge repo; se offline non rompe l'installer
+  # aggiunge repo; se offline non blocca l'installer
   curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash || true
   apt-get update || true
   apt-get install -y speedtest || true

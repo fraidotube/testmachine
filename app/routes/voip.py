@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Form, Query
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
+from fastapi import APIRouter, Form, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse, PlainTextResponse
 from html import escape
 from pathlib import Path
-import os, json, time, subprocess, re, signal, shlex
+import os, json, time, subprocess, re, signal, shlex, tempfile
+from typing import List, Dict, Any, Tuple, Optional
+from routes.auth import verify_session_cookie, _load_users
 
 router = APIRouter(prefix="/voip", tags=["voip"])
 
@@ -10,7 +12,7 @@ router = APIRouter(prefix="/voip", tags=["voip"])
 VOIP_DIR   = Path("/var/lib/netprobe/voip")
 CAP_DIR    = VOIP_DIR / "captures"
 META_FILE  = VOIP_DIR / "captures.json"   # {"captures":[{file,iface,start_ts,duration_s,pid,filter}]}
-INDEX_FILE = VOIP_DIR / "index.json"      # {"calls":{callid:{...}}, "rtp_streams":[...], "built_ts":...}
+INDEX_FILE = VOIP_DIR / "index.json"      # {"calls":{callid:{...}}, "rtp_streams":[], "built_ts":...}
 CFG_PATH   = Path("/etc/netprobe/voip.json")
 
 # --- default config ---
@@ -23,10 +25,12 @@ DEFAULT_CFG = {
     "allow_bpf": True,
     "privacy_mask_user": False,      # offusca user part (a***e@dom)
     "ui_poll_ms": 1000,
+    "admin_required_actions": ["start", "stop", "delete"],  # azioni protette
+    "default_codec": "PCMU",        # per MOS (fallback)
 }
 
 # --------------- utils base ---------------
-def _run(cmd:list[str], timeout:int|None=None):
+def _run(cmd:List[str], timeout:Optional[int]=None) -> Tuple[int,str,str]:
     p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return p.returncode, p.stdout, p.stderr
 
@@ -39,7 +43,7 @@ def _ensure_dirs():
         INDEX_FILE.write_text(json.dumps({"calls":{}, "rtp_streams":[], "built_ts":0}, indent=2), encoding="utf-8")
     _ensure_cfg()
 
-def _load_meta():
+def _load_meta() -> Dict[str,Any]:
     _ensure_dirs()
     try:
         return json.loads(META_FILE.read_text("utf-8"))
@@ -51,17 +55,20 @@ def _save_meta(meta:dict):
     tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     os.replace(tmp, META_FILE)
 
-def _load_index():
+
+def _load_index() -> Dict[str,Any]:
     _ensure_dirs()
     try:
         return json.loads(INDEX_FILE.read_text("utf-8"))
     except Exception:
         return {"calls":{}, "rtp_streams":[], "built_ts":0}
 
+
 def _save_index(idx:dict):
     tmp = INDEX_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(idx, indent=2), encoding="utf-8")
     os.replace(tmp, INDEX_FILE)
+
 
 def _alive(pid:int|None)->bool:
     if not pid: return False
@@ -70,8 +77,9 @@ def _alive(pid:int|None)->bool:
     except Exception:
         return False
 
-def _list_ifaces():
-    # dumpcap -D > nmcli/ip fallback
+
+def _list_ifaces() -> List[str]:
+    # dumpcap -D > ip fallback
     rc, out, _ = _run(["/usr/bin/dumpcap","-D"])
     if rc==0 and out.strip():
         items=[]
@@ -92,12 +100,14 @@ def _list_ifaces():
         if d not in outl: outl.append(d)
     return outl
 
+
 def _capdir_size() -> int:
     total=0
     for p in CAP_DIR.glob("*.pcapng"):
         try: total += p.stat().st_size
         except Exception: pass
     return total
+
 
 def _apply_quota_rotation(quota_bytes:int) -> int:
     total=_capdir_size()
@@ -111,7 +121,7 @@ def _apply_quota_rotation(quota_bytes:int) -> int:
             p.unlink()
             removed+=1
             total-=sz
-            meta["captures"]=[c for c in meta.get("captures",[]) if c.get("file")!=p.name]
+            meta["captures"]= [c for c in meta.get("captures",[]) if c.get("file")!=p.name]
             if total<=quota_bytes: break
         except Exception: pass
     _save_meta(meta)
@@ -123,7 +133,8 @@ def _ensure_cfg():
     if not CFG_PATH.exists():
         CFG_PATH.write_text(json.dumps(DEFAULT_CFG, indent=2), encoding="utf-8")
 
-def _load_cfg():
+
+def _load_cfg() -> Dict[str,Any]:
     _ensure_cfg()
     try:
         data=json.loads(CFG_PATH.read_text("utf-8"))
@@ -132,19 +143,21 @@ def _load_cfg():
     cfg={**DEFAULT_CFG, **(data or {})}
     # normalize
     try:
-        cfg["sip_ports"]=[int(x) for x in cfg.get("sip_ports", [5060,5061])]
+        cfg["sip_ports"]= [int(x) for x in cfg.get("sip_ports", [5060,5061])]
     except Exception:
-        cfg["sip_ports"]=[5060,5061]
+        cfg["sip_ports"]= [5060,5061]
     try:
-        rng=cfg.get("rtp_range",[10000,20000]); cfg["rtp_range"]=[int(rng[0]), int(rng[1])]
+        rng=cfg.get("rtp_range",[10000,20000]); cfg["rtp_range"]= [int(rng[0]), int(rng[1])]
     except Exception:
-        cfg["rtp_range"]=[10000,20000]
+        cfg["rtp_range"]= [10000,20000]
     return cfg
+
 
 def _save_cfg(cfg:dict):
     tmp = CFG_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     os.replace(tmp, CFG_PATH)
+
 
 def _default_bpf(cfg:dict)->str:
     sip_ports = " or ".join([f"port {p}" for p in cfg["sip_ports"]])
@@ -162,7 +175,8 @@ def _mask_user(s: str)->str:
     except Exception:
         return s
 
-def _tshark_sip_rows(path:Path):
+
+def _tshark_sip_rows(path:Path) -> List[List[str]]:
     # 11 campi
     fields = [
         "-e","frame.time_epoch",
@@ -181,11 +195,12 @@ def _tshark_sip_rows(path:Path):
     rows=[]
     for line in out.splitlines():
         parts=line.split("\t")
-        while len(parts) < 11: parts.append("")  # padding coerente
+        while len(parts) < 11: parts.append("")
         rows.append(parts[:11])
     return rows
 
-def _tshark_rtp_streams(path:Path):
+
+def _tshark_rtp_streams(path:Path) -> List[List[str]]:
     rc, out, err = _run(["/usr/bin/tshark","-r",str(path),"-q","-z","rtp,streams"], timeout=90)
     if rc!=0: return []
     lines=[l for l in out.splitlines() if l.strip()]
@@ -193,14 +208,38 @@ def _tshark_rtp_streams(path:Path):
     header_seen=False
     for l in lines:
         if not header_seen and re.search(r"SSRC", l) and re.search(r"Lost", l):
-            header_seen=True
-            continue
+            header_seen=True; continue
         if header_seen:
             if re.match(r"[-=]+", l): continue
             if re.match(r"\s*$", l): break
             cols=re.sub(r"\s{2,}","\t",l.strip()).split("\t")
             rows.append(cols)
     return rows
+
+
+def _extract_sdp_media_from_sip_pcap(sip_pcap:Path) -> List[Dict[str,Any]]:
+    """Estrae tuple (ip, port, proto, payloads) da SDP nei messaggi SIP."""
+    # tshark fields: sdp.media.port, sdp.media.proto, sdp.connection_info.address, rtp.pt
+    cmd=["/usr/bin/tshark","-r",str(sip_pcap),"-Y","sdp","-T","fields",
+         "-e","sdp.media.port","-e","sdp.media.proto","-e","sdp.connection_info.address","-e","sdp.fmtp.payload_type","-e","sdp.media.attr"]
+    rc, out, err = _run(cmd, timeout=60)
+    medias=[]
+    if rc!=0: return medias
+    for line in out.splitlines():
+        parts=line.split("\t")
+        port = parts[0].split(",")[0] if parts and parts[0] else ""
+        proto= parts[1] if len(parts)>1 else ""
+        addr = parts[2] if len(parts)>2 else ""
+        payload = parts[3] if len(parts)>3 else ""
+        attr = parts[4] if len(parts)>4 else ""
+        try:
+            p=int(port)
+            if 1<=p<=65535 and ("RTP" in proto.upper() or "UDP" in proto.upper()):
+                medias.append({"ip":addr or None, "port":p, "proto":proto, "payload":payload, "attr":attr})
+        except Exception:
+            continue
+    return medias
+
 
 def _build_index_from_pcap(path:Path, privacy_mask=False)->dict:
     calls={}
@@ -217,7 +256,6 @@ def _build_index_from_pcap(path:Path, privacy_mask=False)->dict:
                                 "final_code":None, "method":None, "duration_s":None}
         o["last_ts"]=max(o["last_ts"] or ts, ts or o["last_ts"])
         if meth and not o.get("method"): o["method"]=meth
-        # final response?
         if status and status.isdigit():
             code=int(status)
             if code>=200: o["final_code"]=code
@@ -227,7 +265,6 @@ def _build_index_from_pcap(path:Path, privacy_mask=False)->dict:
         })
         calls[callid]=o
 
-    # compute state/duration
     for k,o in calls.items():
         codes=[m["code"] for m in o["msgs"] if m["code"]]
         final = max(codes) if codes else None
@@ -236,23 +273,43 @@ def _build_index_from_pcap(path:Path, privacy_mask=False)->dict:
         elif 300 <= final < 700: st="failed"
         else: st="in-progress"
         o["status"]=st
-        # duration approx: INVITE .. BYE (se visto) altrimenti finestra osservata
         t_inv = next((m["ts"] for m in o["msgs"] if (m["method"]=="INVITE")), o["first_ts"])
         t_bye = next((m["ts"] for m in o["msgs"] if (m["method"]=="BYE")), None)
         if t_inv and t_bye: o["duration_s"]=max(0, (t_bye - t_inv))
         elif o["first_ts"] and o["last_ts"]: o["duration_s"]=max(0, (o["last_ts"] - o["first_ts"]))
-        # privacy mask
         if privacy_mask:
-            if o.get("from"): o["from"]=_mask_user(o["from"])
-            if o.get("to"):   o["to"]=_mask_user(o["to"])
+            if o.get("from"): o["from"]=_mask_user(o["from"])  # type: ignore
+            if o.get("to"):   o["to"]=_mask_user(o["to"])      # type: ignore
             if o.get("from_full"):
-                o["from_full"]=re.sub(r'(?<=:)[^@>]+(?=@)', lambda m:_mask_user(m.group(0)).split("@")[0], o["from_full"])
+                o["from_full"]=re.sub(r'(?<=:)[^@>]+(?=@)', lambda m:_mask_user(m.group(0)).split("@")[0], o["from_full"])  # type: ignore
             if o.get("to_full"):
-                o["to_full"]=re.sub(r'(?<=:)[^@>]+(?=@)', lambda m:_mask_user(m.group(0)).split("@")[0], o["to_full"])
+                o["to_full"]=re.sub(r'(?<=:)[^@>]+(?=@)', lambda m:_mask_user(m.group(0)).split("@")[0], o["to_full"])    # type: ignore
 
     rtp_rows = _tshark_rtp_streams(path)
     idx={"calls":calls, "rtp_streams":rtp_rows, "built_ts":int(time.time())}
     return idx
+
+# --------------- Auth / Permessi ---------------
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+def _is_admin(req: Request) -> bool:
+    # consenti anche header X-Admin: true per automazioni/CLI locali
+    if req.headers.get("X-Admin", "").lower() in ("1", "true", "yes"):
+        return True
+    user = verify_session_cookie(req)
+    if not user:
+        return False
+    users = _load_users()
+    roles = (users.get(user, {}) or {}).get("roles", []) or []
+    return "admin" in roles
+
+def _require_admin(req: Request):
+    if not _is_admin(req):
+        return JSONResponse({"error": "forbidden", "detail": "Admin only"}, status_code=403)
+    return None
+
 
 # --------------- HTML helpers ---------------
 def _page_head(title:str)->str:
@@ -273,7 +330,6 @@ def voip_page():
     opt="".join(f"<option value='{escape(i)}'>{escape(i)}</option>" for i in ifaces)
     bpf_default=_default_bpf(cfg)
 
-    # last index (for initial table render)
     idx=_load_index()
     calls=list(idx.get("calls", {}).values())
     calls.sort(key=lambda x: x.get("last_ts") or 0, reverse=True)
@@ -294,7 +350,8 @@ def voip_page():
             f"<td class='mono'>{code}</td>"
             f"<td>"
             f"  <a class='btn small' href='/voip/ladder?callid={cid}'>Ladder</a>"
-            f"  <a class='btn small secondary' href='/voip/pcap?callid={cid}'>PCAP SIP</a>"
+            f"  <a class='btn small secondary' href='/voip/pcap?callid={cid}'>PCAP (SIP+RTP)</a>"
+            f"  <a class='btn small secondary' href='/voip/rtp/stats?callid={cid}'>RTP Stats</a>"
             f"</td>"
             "</tr>"
         )
@@ -352,6 +409,9 @@ def voip_page():
       <div>% errori (≥400)</div><div id='k_err'>-</div>
       <div>RTP Streams</div><div id='k_rtp'>-</div>
       <div>Indice aggiornato</div><div id='k_built'>-</div>
+    </div>
+    <div style='margin-top:8px'>
+      <a class='btn small secondary' href='/voip/summary'>Riepilogo veloce</a>
     </div>
   </div>
 
@@ -411,7 +471,6 @@ async function refreshIndex(){
     document.getElementById('k_built').textContent = tsHuman(js.built_ts||0);
 
     const body = document.getElementById('callsBody');
-    // render dinamico sempre, così aggiorniamo la tabella senza reload
     body.innerHTML = calls.slice(0,50).map(o=>{
       const st=o.status||'in-progress';
       const color= st==='ok'?'ok':(st==='failed'?'bad':'warn');
@@ -426,7 +485,8 @@ async function refreshIndex(){
         <td class='mono'>${code}</td>
         <td>
           <a class='btn small' href='/voip/ladder?callid=${encodeURIComponent(cid)}'>Ladder</a>
-          <a class='btn small secondary' href='/voip/pcap?callid=${encodeURIComponent(cid)}'>PCAP SIP</a>
+          <a class='btn small secondary' href='/voip/pcap?callid=${encodeURIComponent(cid)}'>PCAP (SIP+RTP)</a>
+          <a class='btn small secondary' href='/voip/rtp/stats?callid=${encodeURIComponent(cid)}'>RTP Stats</a>
         </td>
       </tr>`;
     }).join('');
@@ -454,6 +514,7 @@ refreshIndex();
     return HTMLResponse(html)
 
 # --------------- API azioni ---------------
+
 def _has_active_capture(meta:dict|None=None)->bool:
     meta = meta or _load_meta()
     now = int(time.time())
@@ -465,8 +526,13 @@ def _has_active_capture(meta:dict|None=None)->bool:
             return True
     return False
 
+
 @router.post("/start")
-def start_capture(iface: str = Form(...), duration: int = Form(...), bpf: str = Form("")):
+def start_capture(request: Request, iface: str = Form(...), duration: int = Form(...), bpf: str = Form("")):
+    # permessi
+    if _require_admin(request):
+        return _require_admin(request)
+
     _ensure_dirs()
     cfg=_load_cfg()
     meta=_load_meta()
@@ -503,8 +569,11 @@ def start_capture(iface: str = Form(...), duration: int = Form(...), bpf: str = 
     _save_meta(meta)
     return RedirectResponse(url="/voip", status_code=303)
 
+
 @router.post("/stop", response_class=JSONResponse)
-def stop_capture(file: str = Form(None)):
+def stop_capture(request: Request, file: str = Form(None)):
+    if _require_admin(request):
+        return _require_admin(request)
     meta=_load_meta()
     stopped=0
     for c in meta.get("captures", []):
@@ -517,6 +586,7 @@ def stop_capture(file: str = Form(None)):
                 except Exception: pass
             stopped+=1
     return {"stopped": stopped}
+
 
 @router.get("/status", response_class=JSONResponse)
 def status():
@@ -534,10 +604,18 @@ def status():
             active.append({"file":c["file"],"iface":c["iface"],"remaining_s":remaining,"size":size})
     return {"active": active}
 
+
+@router.get("/list", response_class=JSONResponse)
+def list_pcaps():
+    files=sorted(CAP_DIR.glob("*.pcapng"), key=lambda p:p.stat().st_mtime, reverse=True)
+    return {"files":[{"file":p.name, "size":p.stat().st_size, "mtime":int(p.stat().st_mtime)} for p in files]}
+
 # --------------- indicizzazione & dati ---------------
-def _latest_pcap()->Path|None:
+
+def _latest_pcap()->Optional[Path]:
     items=sorted(CAP_DIR.glob("*.pcapng"), key=lambda p:p.stat().st_mtime)
     return items[-1] if items else None
+
 
 @router.post("/reindex", response_class=JSONResponse)
 def reindex():
@@ -548,6 +626,7 @@ def reindex():
     idx=_build_index_from_pcap(p, privacy_mask=bool(cfg.get("privacy_mask_user", False)))
     _save_index(idx)
     return {"ok": True, "calls": len(idx.get("calls",{})), "rtp_streams": len(idx.get("rtp_streams",[]))}
+
 
 @router.get("/calls", response_class=JSONResponse)
 def calls(limit:int=Query(100, ge=1, le=1000)):
@@ -561,6 +640,7 @@ def calls(limit:int=Query(100, ge=1, le=1000)):
         "built_ts": idx.get("built_ts",0)
     }
 
+
 @router.get("/call/{callid}", response_class=JSONResponse)
 def call_detail(callid:str):
     idx=_load_index()
@@ -569,18 +649,62 @@ def call_detail(callid:str):
         return JSONResponse({"error":"not_found"}, status_code=404)
     return o
 
+# --------------- Export PCAP per-call (SIP + RTP) ---------------
+
+def _export_sip_for_call(src_pcap:Path, callid:str, out_sip:Path) -> bool:
+    display_filter = f'sip.Call-ID == "{callid}"'
+    cmd=["/usr/bin/tshark","-r",str(src_pcap),"-Y",display_filter,"-w",str(out_sip)]
+    rc, _, _ = _run(cmd, timeout=180)
+    return rc==0 and out_sip.exists() and out_sip.stat().st_size>0
+
+
+def _merge_pcaps(out_path:Path, parts:List[Path]) -> bool:
+    # usa mergecap se presente, altrimenti tshark -w out -r part1 -r part2 ...
+    if shutil.which("/usr/bin/mergecap"):
+        cmd=["/usr/bin/mergecap","-w",str(out_path)] + [str(p) for p in parts]
+        rc,_,_=_run(cmd, timeout=120)
+        return rc==0 and out_path.exists() and out_path.stat().st_size>0
+    cmd=["/usr/bin/tshark","-w",str(out_path)]
+    for p in parts: cmd += ["-r", str(p)]
+    rc,_,_=_run(cmd, timeout=180)
+    return rc==0 and out_path.exists() and out_path.stat().st_size>0
+
+
+import shutil
+
+def _export_call_with_rtp(src_pcap:Path, callid:str, out_pcap:Path) -> bool:
+    """Strategia: 1) estrai SIP per Call-ID; 2) ricava tuple SDP (ip,port); 3) estrai RTP per tuple e mergia."""
+    with tempfile.TemporaryDirectory() as td:
+        td=Path(td)
+        sip_pcap = td/"sip.pcapng"
+        if not _export_sip_for_call(src_pcap, callid, sip_pcap):
+            return False
+        medias = _extract_sdp_media_from_sip_pcap(sip_pcap)
+        rtp_parts=[sip_pcap]
+        for i,m in enumerate(medias):
+            if not m.get("port"): continue
+            # Costruisco display-filter UDP porta (src o dst) e opzionale IP
+            port = int(m["port"])  # type: ignore
+            ip   = m.get("ip")
+            dfilter = f"udp && (udp.srcport=={port} || udp.dstport=={port})"
+            if ip: dfilter = f"ip.addr=={ip} && ("+dfilter+")"
+            outi = td/f"rtp_{i}.pcapng"
+            rc,_,_=_run(["/usr/bin/tshark","-r",str(src_pcap),"-Y",dfilter,"-w",str(outi)], timeout=180)
+            if rc==0 and outi.exists() and outi.stat().st_size>0:
+                rtp_parts.append(outi)
+        # merge
+        return _merge_pcaps(out_pcap, rtp_parts)
+
+
 @router.get("/pcap")
 def pcap_for_call(callid: str = Query(...)):
-    # MVP: estrai SOLO SIP della call-id; step successivo: export con sngrep (SIP+RTP correlati)
     p=_latest_pcap()
     if not p or not p.exists():
         return HTMLResponse("Nessuna cattura trovata", status_code=404)
     safe_name = re.sub(r'[^A-Za-z0-9_.-]','_',callid)
-    out_path = VOIP_DIR / f"sip_{safe_name}.pcapng"
-    display_filter = f'sip.Call-ID == "{callid}"'
-    cmd=["/usr/bin/tshark","-r",str(p),"-Y",display_filter,"-w",str(out_path)]
-    rc, out, err = _run(cmd, timeout=120)
-    if rc!=0 or not out_path.exists() or out_path.stat().st_size==0:
+    out_path = VOIP_DIR / f"call_{safe_name}.pcapng"
+    ok = _export_call_with_rtp(p, callid, out_path)
+    if not ok:
         return HTMLResponse("Export fallito o vuoto.", status_code=500)
     return FileResponse(out_path, filename=out_path.name, media_type="application/octet-stream")
 
@@ -598,7 +722,7 @@ def ladder(callid:str = Query(...)):
         b_ip = msgs[0].get("dst") or ""
     else:
         a_ip, b_ip = "", ""
-    def who(ip):
+    def who(ip:str):
         if ip==a_ip: return "A"
         if ip==b_ip: return "B"
         return "P"
@@ -625,6 +749,101 @@ def ladder(callid:str = Query(...)):
 </div></div></div></body></html>
 """
     return HTMLResponse(html)
+
+# --------------- RTP Stats + MOS ---------------
+
+def _estimate_mos(loss_pct:float, jitter_ms:float, codec:str="PCMU") -> float:
+    """Stima MOS (E-model semplificato). Assumiamo Ro=94.2, Id≈0, A=0. Codec: PCMU/PCMA con Ie=0, Bpl≈10.
+    Ie_eff = Ie + (95 - Ie) * Ppl / (Ppl/Bpl + 95)."""
+    codec=codec.upper()
+    Ie = 0.0 if codec in ("PCMU","PCMA","G711","G.711") else 5.0  # fallback semplice
+    Bpl = 10.0 if Ie==0 else 19.0
+    Ppl = max(0.0, float(loss_pct))
+    Ie_eff = Ie + (95.0 - Ie) * (Ppl) / (Ppl / Bpl + 95.0)
+    # penalità jitter (molto semplificata)
+    J = max(0.0, float(jitter_ms))
+    Id = min(20.0, J/10.0)
+    R = 94.2 - Id - Ie_eff
+    if R < 0: mos = 1.0
+    elif R > 100: mos = 4.5
+    else:
+        mos = 1.0 + 0.035*R + R*(R-60.0)*(100.0-R)*7e-6
+    return round(max(1.0, min(4.5, mos)), 2)
+
+
+def _rtp_stats_from_pcap(path:Path) -> List[Dict[str,Any]]:
+    rows=_tshark_rtp_streams(path)
+    stats=[]
+    for r in rows:
+        # Colonne tipiche (posizioni possono variare per versioni diverse). Estrapoliamo con ricerca.
+        line='\t'.join(r)
+        def grab(pattern:str, default:Optional[float]=None) -> Optional[float]:
+            m=re.search(pattern, line)
+            try:
+                return float(m.group(1)) if m else default
+            except Exception:
+                return default
+        s={
+            "ssrc": re.search(r"SSRC=([0-9a-fxA-F]+)", line).group(1) if re.search(r"SSRC=([0-9a-fxA-F]+)", line) else None,
+            "ip_src": re.search(r"From (\S+):(\d+)", line).group(1) if re.search(r"From (\S+):(\d+)", line) else None,
+            "port_src": int(re.search(r"From (\S+):(\d+)", line).group(2)) if re.search(r"From (\S+):(\d+)", line) else None,
+            "ip_dst": re.search(r"To (\S+):(\d+)", line).group(1) if re.search(r"To (\S+):(\d+)", line) else None,
+            "port_dst": int(re.search(r"To (\S+):(\d+)", line).group(2)) if re.search(r"To (\S+):(\d+)", line) else None,
+            "pkt": grab(r"Packets:(\d+)", 0) or 0,
+            "lost": grab(r"Lost:(\d+)", 0) or 0,
+            "jitter_ms": grab(r"Jitter:\s*([0-9.]+)") or 0.0,
+            "kbps": grab(r"Bandwidth:\s*([0-9.]+)\s*kbits/s") or None,
+            "pt": re.search(r"PT=([0-9]+)", line).group(1) if re.search(r"PT=([0-9]+)", line) else None,
+        }
+        try:
+            loss_pct = (float(s["lost"]) / max(1.0, float(s["pkt"])))*100.0
+        except Exception:
+            loss_pct = 0.0
+        codec = _load_cfg().get("default_codec","PCMU")
+        s["loss_pct"]= round(loss_pct, 2)
+        s["mos"] = _estimate_mos(loss_pct, float(s["jitter_ms"] or 0.0), codec)
+        stats.append(s)
+    return stats
+
+
+@router.get("/rtp/stats", response_class=JSONResponse)
+def rtp_stats(callid:str = Query(...)):
+    p=_latest_pcap()
+    if not p or not p.exists():
+        return JSONResponse({"error":"no_pcap"}, status_code=404)
+    with tempfile.TemporaryDirectory() as td:
+        td=Path(td)
+        out_path = td/"call.pcapng"
+        if not _export_call_with_rtp(p, callid, out_path):
+            return JSONResponse({"error":"export_failed"}, status_code=500)
+        stats = _rtp_stats_from_pcap(out_path)
+        return {"callid":callid, "rtp_streams": stats}
+
+# --------------- Riepiloghi rapidi (SIP/RTP/DNS in pcap) ---------------
+@router.get("/summary", response_class=JSONResponse)
+def quick_summary(limit:int=Query(200, ge=10, le=2000)):
+    p=_latest_pcap()
+    if not p or not p.exists():
+        return JSONResponse({"error":"no_pcap"}, status_code=404)
+    # conteggio metodi e risposte
+    rc1, out1, _ = _run(["/usr/bin/tshark","-r",str(p),"-Y","sip.Method","-T","fields","-e","sip.Method"], timeout=90)
+    rc2, out2, _ = _run(["/usr/bin/tshark","-r",str(p),"-Y","sip.Status-Code","-T","fields","-e","sip.Status-Code"], timeout=90)
+    # DNS NAPTR/SRV visti
+    rc3, out3, _ = _run(["/usr/bin/tshark","-r",str(p),"-Y","dns.flags.response == 1 && (dns.naptr || dns.srv.name)","-T","fields","-e","dns.qry.name","-e","dns.srv.name","-e","dns.naptr.service"], timeout=90)
+    from collections import Counter
+    mcount = Counter(out1.split()) if rc1==0 else Counter()
+    scount = Counter(out2.split()) if rc2==0 else Counter()
+    dns_rows = [l.split("\t") for l in out3.splitlines()] if rc3==0 else []
+    # Top endpoints SIP
+    rc4, out4, _ = _run(["/usr/bin/tshark","-r",str(p),"-Y","sip","-T","fields","-e","ip.src","-e","ip.dst"], timeout=90)
+    pairs = [tuple(x.split("\t")) for x in out4.splitlines() if "\t" in x] if rc4==0 else []
+    ep = Counter([a for a,_ in pairs] + [b for _,b in pairs])
+    return {
+        "methods": mcount.most_common(20),
+        "status": scount.most_common(20),
+        "dns": dns_rows[:limit],
+        "top_endpoints": ep.most_common(20)
+    }
 
 # --------------- Settings page ---------------
 @router.get("/settings", response_class=HTMLResponse)
@@ -671,6 +890,7 @@ def settings_page():
 """
     return HTMLResponse(html)
 
+
 @router.post("/settings")
 def settings_save(sip_ports: str = Form(...),
                   rtp_range: str = Form(...),
@@ -681,30 +901,28 @@ def settings_save(sip_ports: str = Form(...),
                   privacy_mask_user: str = Form(None),
                   ui_poll_ms: int = Form(...)):
     cfg=_load_cfg()
-    # sip ports
     try:
         ports=[int(x.strip()) for x in sip_ports.split(",") if x.strip()]
         cfg["sip_ports"]= [p for p in ports if 1<=p<=65535] or [5060,5061]
     except Exception:
-        cfg["sip_ports"]=[5060,5061]
-    # rtp range
+        cfg["sip_ports"]= [5060,5061]
     try:
         a,b = rtp_range.replace(" ","").split("-",1)
         a,b=int(a),int(b)
         if a>b: a,b=b,a
         a=max(1,a); b=min(65535,b)
-        cfg["rtp_range"]=[a,b]
+        cfg["rtp_range"]= [a,b]
     except Exception:
-        cfg["rtp_range"]=[10000,20000]
+        cfg["rtp_range"]= [10000,20000]
 
     cfg["duration_max"]=max(1, min(int(duration_max), 86400))
     try:
         cfg["quota_gb"]=max(1.0, float(quota_gb))
     except Exception:
         cfg["quota_gb"]=DEFAULT_CFG["quota_gb"]
-    cfg["policy"]="rotate" if policy=="rotate" else "block"
-    cfg["allow_bpf"]=bool(allow_bpf)
-    cfg["privacy_mask_user"]=bool(privacy_mask_user)
-    cfg["ui_poll_ms"]=max(250, min(int(ui_poll_ms), 20000))
+    cfg["policy"]= "rotate" if policy=="rotate" else "block"
+    cfg["allow_bpf"]= bool(allow_bpf)
+    cfg["privacy_mask_user"]= bool(privacy_mask_user)
+    cfg["ui_poll_ms"]= max(250, min(int(ui_poll_ms), 20000))
     _save_cfg(cfg)
     return RedirectResponse(url="/voip/settings", status_code=303)

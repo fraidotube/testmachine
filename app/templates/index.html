@@ -40,6 +40,14 @@
       background: linear-gradient(160deg, rgba(16,185,129,.25), rgba(5,150,105,.10));
       border: 1px solid rgba(16,185,129,.35);
     }
+    .card--netmap{
+      background: linear-gradient(160deg, rgba(255,255,129,.25), rgba(5,150,105,.10));
+      border: 1px solid rgba(16,185,129,.35);
+    }
+    .card--voip{
+      background: linear-gradient(160deg, rgba(16,255,255,.25), rgba(5,150,105,.10));
+      border: 1px solid rgba(16,185,129,.35);
+    }
     .tool-icon{width:26px;height:26px;opacity:.95}
 
     /* ---------- SETTINGS CARDS UNIFORME ---------- */
@@ -120,7 +128,6 @@
         </div>
 
         <div class="muted-small" style="margin-top:10px">
-          dumpcap caps: <span id="caps" class="mono">-</span>
           <span class="right">Ultimo aggiornamento: <span id="ts">-</span></span>
         </div>
       </div>
@@ -165,7 +172,18 @@
         <p class="muted">Tool di analisi VoIP.</p>
         <a class="btn" href="/voip">Apri VoIP Tool</a>
       </div>
+      <!-- Netscan -->
+      <div class="card card--tool card--netmap" style="margin-top:6px">
+        <h2>
+          <img class="tool-icon" src="/static/img/netmap.svg" alt="Netmap" onerror="this.style.display='none'">
+          Netmap
+        </h2>
+        <p class="muted">Mappa i dispositivi presenti nella rete.</p>
+        <a class="btn" href="/netmap">Apri Netmap</a>
+      </div>
+      
     </div>
+    
     
     
 

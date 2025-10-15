@@ -162,7 +162,7 @@ def _nav():
           "<div class='brand'><img src='/static/img/logo.svg' class='logo'/></div>"
           "<div class='title-center'>TestMachine</div>"
           "<div class='spacer'><a class='btn secondary' href='/'>Home</a></div>"
-          "<div class='spacer'><a class='btn secondary' href=href='/auth/logout?next=/'>Logout</a></div>"
+          "<div class='spacer'> <a class='btn secondary' href='/auth/logout?next=/'>Logout</a>  </div>"
         "</div>"    
     
     

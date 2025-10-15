@@ -15,6 +15,34 @@ APP_GROUP=netprobe
 API_PORT=9000
 WEB_PORT=${WEB_PORT:-8080}
 
+# --- APT: abilita contrib/non-free/non-free-firmware PRIMA di ogni update ---
+step "Abilito componenti APT: contrib non-free non-free-firmware"
+. /etc/os-release
+CODENAME="${VERSION_CODENAME:-bookworm}"
+SRC=/etc/apt/sources.list
+if [[ -f "$SRC" ]]; then
+  cp -n "$SRC" "${SRC}.bak.$(date +%F_%H%M%S)" || true
+  tmp=$(mktemp)
+  awk '
+    BEGIN{OFS=" "}
+    /^deb\s+http/ {
+      line=$0
+      if (line !~ / main/) line=line" main"
+      if (line !~ / contrib/) line=line" contrib"
+      if (line !~ / non-free[^-]/) line=line" non-free"
+      if (line !~ / non-free-firmware/) line=line" non-free-firmware"
+      print line; next
+    }
+    {print}
+  ' "$SRC" > "$tmp" && mv "$tmp" "$SRC"
+else
+  cat >"$SRC" <<EOF
+deb http://deb.debian.org/debian $CODENAME main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian $CODENAME-updates main contrib non-free non-free-firmware
+deb http://security.debian.org/debian-security $CODENAME-security main contrib non-free non-free-firmware
+EOF
+fi
+
 # --- pacchetti base ---
 step "APT update & install base"
 export DEBIAN_FRONTEND=noninteractive
@@ -26,6 +54,19 @@ apt-get install -y --no-install-recommends \
   smokeping fping \
   network-manager \
   tshark wireshark-common tcpdump libcap2-bin
+
+# --- pacchetti Net Mapper (nmap/arp-scan/dns/snmp/bonjour/oui) ---
+step "Install Net Mapper deps"
+apt-get install -y --no-install-recommends \
+  nmap arp-scan dnsutils snmp snmp-mibs-downloader avahi-utils ieee-data
+
+# --- SNMP MIBs: abilita caricamento (Debian ha spesso 'mibs :' disabilitante) ---
+step "SNMP: abilito caricamento MIB (commento 'mibs :')"
+SNMPCFG=/etc/snmp/snmp.conf
+if [[ -f "$SNMPCFG" ]]; then
+  cp -n "$SNMPCFG" "${SNMPCFG}.bak.$(date +%F_%H%M%S)" || true
+  sed -i 's/^[[:space:]]*mibs[[:space:]]*:.*/# mibs :/g' "$SNMPCFG" || true
+fi
 
 # --- utente/gruppo app ---
 step "Utente/gruppo ${APP_USER}"
@@ -52,7 +93,6 @@ python3 -m venv "${APP_DIR}/venv"
 if [[ -f "${APP_DIR}/requirements.txt" ]]; then
   "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
 else
-  # include anche speedtest-cli (fallback Python)
   "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart speedtest-cli
 fi
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
@@ -83,7 +123,6 @@ step "Apache moduli"
 a2enmod proxy proxy_http headers rewrite cgid >/dev/null
 
 step "Apache porta ${WEB_PORT}"
-# disabilita la 80 se presente e aggiunge porta custom
 sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
 grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 
@@ -100,7 +139,6 @@ cat >/etc/apache2/sites-available/testmachine.conf <<EOF
   ProxyPass        / http://127.0.0.1:${API_PORT}/
   ProxyPassReverse / http://127.0.0.1:${API_PORT}/
 
-  # Lascia /smokeping/ servito direttamente da Apache (conf ufficiale)
   <Location /smokeping/>
     ProxyPass !
     Require all granted
@@ -117,8 +155,15 @@ a2enconf smokeping >/dev/null || true
 step "Packet capture: abilita dumpcap non-root"
 setcap cap_net_raw,cap_net_admin+eip /usr/bin/dumpcap || true
 getcap /usr/bin/dumpcap || true
-# Aggiunge anche al gruppo 'wireshark' se presente (Debian lo usa per catture non-root)
 getent group wireshark >/dev/null && usermod -aG wireshark "${APP_USER}" || true
+
+# --- Net Mapper: capability per arp-scan / nmap ---
+step "Net Mapper: capability per arp-scan e nmap (non-root)"
+command -v setcap >/dev/null 2>&1 || apt-get install -y libcap2-bin
+setcap cap_net_raw,cap_net_admin+eip /usr/sbin/arp-scan || true
+setcap cap_net_raw,cap_net_admin+eip /usr/bin/nmap || true
+getcap /usr/sbin/arp-scan || true
+getcap /usr/bin/nmap || true
 
 # --- gruppi/permessi per file e config ---
 usermod -aG "${APP_GROUP}" smokeping || true
@@ -143,46 +188,15 @@ EOF
   chmod 0660 /etc/smokeping/config.d/Targets
 fi
 
-# --- SUDOERS ---
-step "Sudoers per netprobe"
-cat >/etc/sudoers.d/netprobe-ops <<'EOF'
-Defaults:netprobe !requiretty
-Cmnd_Alias NP_COPY = \
-  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/ports.conf, \
-  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/sites-available/testmachine.conf, \
-  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/systemd/timesyncd.conf
-Cmnd_Alias NP_SVC = \
-  /bin/systemctl reload apache2, /usr/bin/systemctl reload apache2, \
-  /bin/systemctl restart apache2, /usr/bin/systemctl restart apache2, \
-  /bin/systemctl reload smokeping, /usr/bin/systemctl reload smokeping, \
-  /bin/systemctl try-reload-or-restart systemd-timesyncd, /usr/bin/systemctl try-reload-or-restart systemd-timesyncd
-Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
-Cmnd_Alias NP_NM = /usr/bin/nmcli *
-netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM
-EOF
-chmod 440 /etc/sudoers.d/netprobe-ops
-visudo -c
-
-# --- Workdir app & PCAP & SPEEDTEST & VOIP ---
-step "Workdir app + PCAP + SPEEDTEST + VOIP"
+# --- Workdir app & PCAP & SPEEDTEST & VOIP & NETMAP ---
+step "Workdir app + PCAP + SPEEDTEST + VOIP + NETMAP"
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe /var/lib/netprobe/tmp
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/pcap
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/speedtest
 
-# seed file stato speedtest
-if [[ ! -f /var/lib/netprobe/speedtest/state.json ]]; then
-  cat >/var/lib/netprobe/speedtest/state.json <<'JSON'
-{"pid": null, "started": null, "result": null, "tool": null}
-JSON
-  chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/speedtest/state.json
-  chmod 0660 /var/lib/netprobe/speedtest/state.json
-fi
-
-# --- VOIP: dir e seed index/meta ---
+# VOIP
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/voip
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/voip/captures
-
-# meta/index se mancanti
 if [[ ! -f /var/lib/netprobe/voip/captures.json ]]; then
   echo '{"captures":[]}' >/var/lib/netprobe/voip/captures.json
   chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/captures.json
@@ -193,8 +207,6 @@ if [[ ! -f /var/lib/netprobe/voip/index.json ]]; then
   chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/index.json
   chmod 0660 /var/lib/netprobe/voip/index.json
 fi
-
-# config voip.json se assente (valori di default)
 install -d -m 0770 -o root -g "${APP_GROUP}" /etc/netprobe
 if [[ ! -f /etc/netprobe/voip.json ]]; then
   cat >/etc/netprobe/voip.json <<'JSON'
@@ -215,15 +227,42 @@ JSON
   chmod 0660 /etc/netprobe/voip.json
 fi
 
+# NETMAP
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/netmap
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/netmap/scans
+if [[ ! -f /var/lib/netprobe/netmap/index.json ]]; then
+  echo '{"scans":[]}' >/var/lib/netprobe/netmap/index.json
+  chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/netmap/index.json
+  chmod 0660 /var/lib/netprobe/netmap/index.json
+fi
+
+# --- SUDOERS ---
+step "Sudoers per netprobe"
+cat >/etc/sudoers.d/netprobe-ops <<'EOF'
+Defaults:netprobe !requiretty
+Cmnd_Alias NP_COPY = \
+  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/ports.conf, \
+  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/sites-available/testmachine.conf, \
+  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/systemd/timesyncd.conf
+Cmnd_Alias NP_SVC = \
+  /bin/systemctl reload apache2, /usr/bin/systemctl reload apache2, \
+  /bin/systemctl restart apache2, /usr/bin/systemctl restart apache2, \
+  /bin/systemctl reload smokeping, /usr/bin/systemctl reload smokeping, \
+  /bin/systemctl try-reload-or-restart systemd-timesyncd, /usr/bin/systemctl try-reload-or-restart systemd-timesyncd
+Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
+Cmnd_Alias NP_NM = /usr/bin/nmcli *
+netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM
+EOF
+chmod 440 /etc/sudoers.d/netprobe-ops
+visudo -c
+
 # --- Speedtest (Ookla CLI) + fallback Python ---
 step "Installazione Ookla Speedtest CLI (repo packagecloud)"
 if ! command -v speedtest >/dev/null 2>&1; then
-  # aggiunge repo; se offline non blocca l'installer
   curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash || true
   apt-get update || true
   apt-get install -y speedtest || true
 fi
-# fallback: comunque abbiamo il modulo Python in venv (già installato sopra)
 if command -v speedtest >/dev/null 2>&1; then
   echo "Ookla speedtest: $(speedtest --version 2>&1 | head -n1 || true)"
 else

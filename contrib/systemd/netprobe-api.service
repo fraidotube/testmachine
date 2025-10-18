@@ -1,0 +1,21 @@
+# /etc/systemd/system/netprobe-api.service
+[Unit]
+Description=TestMachine API (FastAPI)
+Requires=netprobe-api.socket
+After=netprobe-api.socket local-fs.target
+
+[Service]
+Type=simple
+User=netprobe
+Group=netprobe
+WorkingDirectory=/opt/netprobe/app
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/opt/netprobe/venv/bin:/usr/bin
+# uvicorn userà il socket già aperto da systemd su fd=3
+ExecStart=/opt/netprobe/venv/bin/uvicorn main:app --fd 3
+Restart=always
+RestartSec=2
+
+[Install]
+# Con socket-activation non serve abilitare la service al boot
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+# /etc/systemd/system/netprobe-api.socket
+[Unit]
+Description=Socket for TestMachine API (FastAPI)
+
+[Socket]
+ListenStream=127.0.0.1:9000
+NoDelay=true
+ReusePort=true
+
+[Install]
+WantedBy=sockets.target

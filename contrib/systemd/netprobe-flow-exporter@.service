@@ -1,0 +1,32 @@
+# /etc/systemd/system/netprobe-flow-exporter@.service
+[Unit]
+Description=TestMachine Flow Exporter (softflowd) on %i
+After=network-online.target netprobe-flow-collector.service
+Wants=network-online.target netprobe-flow-collector.service
+
+[Service]
+Type=simple
+User=root
+# softflowd necessita di raw socket → root. (Se vuoi non-root serve CAP_NET_RAW + ambient caps)
+
+# Timeout di export aggressivi per demo + verbose v9
+ExecStart=/usr/sbin/softflowd -D -i %i -n 127.0.0.1:2055 -v 9 -T full \
+  -t tcp.fin=10 -t tcp.rst=10 -t udp=10 -t icmp=10 -t general=30 -t expint=5 \
+  -c /run/softflowd.%i.ctl
+
+Restart=always
+RestartSec=2
+
+[Install]
+# NON abilitiamo istanze al boot: la UI le avvia al bisogno (systemctl start netprobe-flow-exporter@IFACE)
+WantedBy=multi-user.target
+
+# /etc/systemd/system/netprobe-flow-exporter@.service.d/override.conf
+[Unit]
+After=network-online.target netprobe-flow-collector.service
+Wants=network-online.target
+Requires=netprobe-flow-collector.service
+
+[Service]
+Restart=on-failure
+RestartSec=2

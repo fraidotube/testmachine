@@ -1,4 +1,4 @@
-# /opt/netprobe/app/routes/flow.py
+# -*- coding: utf-8 -*-
 from fastapi import APIRouter, Request, Form, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from html import escape
@@ -74,15 +74,13 @@ def _time_range_str(window: str) -> tuple[str, str, int, int]:
     sec = _window_to_seconds(window)
     t_end = int(time.time())
     t_start = t_end - sec
-    # formato per nfdump: YYYY/MM/DD.HH:MM:SS
-    fmt = "%Y/%m/%d.%H:%M:%S"
+    fmt = "%Y/%m/%d.%H:%M:%S"  # formato per nfdump
     ts = time.strftime(fmt, time.localtime(t_start))
     te = time.strftime(fmt, time.localtime(t_end))
     return ts, te, t_start, t_end
 
 def _nfdump_csv_rows(window: str = "15m", limit: int = 200000):
     ts, te, _, _ = _time_range_str(window)
-    # niente -q: teniamo l'header CSV; poi scartiamo Summary in parsing
     args = ["nfdump", "-R", FLOWS_DIR, "-t", f"{ts}-{te}", "-o", "csv", "-c", str(limit)]
     rc, out, err = _runp(args, timeout=30)
     if rc != 0 or not out:
@@ -94,27 +92,19 @@ def _nfdump_csv_rows(window: str = "15m", limit: int = 200000):
         ln = raw.strip()
         if not ln:
             continue
-        # header CSV
         if ln.lower().startswith("ts,"):
             header = [h.strip() for h in ln.split(",")]
             continue
-        # blocco finale "Summary" da ignorare
         if ln.startswith("Summary"):
             break
-        # a volte subito dopo "Summary" compare la riga "flows,bytes,...": saltiamola
         if ln.lower().startswith("flows,bytes"):
             break
-        # finché non vediamo l'header saltiamo tutto
         if header is None:
             continue
-
         parts = [p.strip() for p in ln.split(",")]
         if len(parts) != len(header):
-            # linea non conforme (es. residui di summary) -> skip
             continue
-
         rows.append(dict(zip(header, parts)))
-
     return rows
 
 def _to_int(x, default=0):
@@ -154,14 +144,12 @@ def _aggregate(rows: list[dict], n: int = 10):
     }
 
 def _timeseries(rows: list[dict], t_start: int, t_end: int, step: int = 60):
-    # binning su "te" (end time)
     bins = []
     t = (t_start // step) * step
     while t <= t_end:
         bins.append(t)
         t += step
     byts = [0] * len(bins)
-
     for r in rows:
         te = r.get("te") or r.get("end") or ""
         try:
@@ -173,7 +161,6 @@ def _timeseries(rows: list[dict], t_start: int, t_end: int, step: int = 60):
         idx = (ts_end - bins[0]) // step
         if 0 <= idx < len(byts):
             byts[idx] += ib
-
     labels = [time.strftime("%H:%M:%S", time.localtime(x)) for x in bins]
     return {"labels": labels, "bytes": byts}
 
@@ -268,14 +255,16 @@ def flow_dashboard(request: Request, window: str = Query("15m"), n: int = Query(
     <h2>Flow Monitor</h2>
     <div id="st" class="small" style="margin-bottom:8px"></div>
 
-    <form method='post' action='/flow/exporter/start' class='row'>
+    <!-- form senza action: lo gestiamo via JS -->
+    <form id='expForm' class='row'>
       <div>
         <label>Interfaccia</label>
         <select name='iface'>__IFACE_OPTIONS__</select>
       </div>
-      <button class='btn' type='submit'>Start exporter</button>
-      <button class='btn danger' formaction='/flow/exporter/stop' formmethod='post' type='submit'>Stop tutti</button>
+      <button class='btn' type='submit' data-action='/flow/exporter/start'>Start exporter</button>
+      <button class='btn danger' type='submit' data-action='/flow/exporter/stop'>Stop tutti</button>
     </form>
+    <div id="flash" class="small mono" style="margin-top:6px;"></div>
 
     <div class='row' style='margin-top:10px'>
       <label>Finestra</label>
@@ -381,6 +370,28 @@ async function refreshAll(){
     updTable("#tblPort", s.top.dstport);
   }catch(e){}
 }
+
+// Gestione AJAX dei pulsanti Start/Stop
+(function(){
+  const form = document.getElementById("expForm");
+  const flash = document.getElementById("flash");
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const action = ev.submitter && ev.submitter.dataset.action ? ev.submitter.dataset.action : "/flow/exporter/start";
+    const body = new FormData(form);
+    try{
+      const r = await fetch(action, { method:"POST", body });
+      let ok=false, msg="";
+      try { const j = await r.json(); ok = !!j.ok; msg = j.detail || j.error || ""; } catch(_){}
+      flash.textContent = ok ? "OK" + (msg ? " - " + msg : "") : "Errore" + (msg ? " - " + msg : "");
+      fetchStatus();
+      refreshAll();
+    }catch(e){
+      flash.textContent = "Errore di rete";
+    }
+    setTimeout(()=>{ flash.textContent=""; }, 2500);
+  });
+})();
 
 fetchStatus();
 refreshAll();

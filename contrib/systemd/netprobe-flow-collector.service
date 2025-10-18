@@ -1,0 +1,48 @@
+# /etc/systemd/system/netprobe-flow-collector.service
+[Unit]
+Description=TestMachine Flow Collector (nfcapd)
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netprobe
+Group=netprobe
+
+# Assicura path e symlink che usa la UI
+ExecStartPre=/usr/bin/install -d -m 2770 -o netprobe -g netprobe /var/lib/nfsen-ng/profiles-data/live/netprobe
+ExecStartPre=/bin/ln -snf /var/lib/nfsen-ng/profiles-data/live/netprobe /var/lib/netprobe/flows
+
+# nfcapd compatibile con nfsen-ng: rotazione 60s, porta 2055
+ExecStart=/usr/bin/nfcapd -w /var/lib/nfsen-ng/profiles-data/live/netprobe -S 1 -p 2055 -t 60
+
+Restart=always
+RestartSec=2
+# Facoltativi ma utili
+StartLimitIntervalSec=0
+LimitNOFILE=65536
+IOSchedulingClass=best-effort
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/netprobe-flow-collector.service.d/10-free-port.conf
+[Service]
+# ignora eventuali errori (- davanti al comando) e NON usare "|| true"
+ExecStartPre=-/usr/bin/fuser -k -n udp 2055
+
+# /etc/systemd/system/netprobe-flow-collector.service.d/override.conf
+[Service]
+ExecStart=
+ExecStart=/usr/bin/nfcapd -w /var/lib/nfsen-ng/profiles-data/live/netprobe -S 1 -p 2055 -t 60
+Restart=on-failure
+RestartSec=2
+
+[Service]
+PermissionsStartOnly=true
+
+# /etc/systemd/system/netprobe-flow-collector.service.d/retry.conf
+[Service]
+Restart=on-failure
+RestartSec=2

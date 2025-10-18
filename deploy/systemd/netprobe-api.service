@@ -1,14 +1,20 @@
 [Unit]
 Description=TestMachine API (FastAPI)
-After=network-online.target
+Requires=netprobe-api.socket
+After=netprobe-api.socket local-fs.target
 
 [Service]
+Type=simple
 User=netprobe
 Group=netprobe
 WorkingDirectory=/opt/netprobe/app
-Environment="PYTHONPATH=/opt/netprobe/app"
-ExecStart=/opt/netprobe/venv/bin/uvicorn main:app --host 127.0.0.1 --port 9000
-Restart=on-failure
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/opt/netprobe/venv/bin:/usr/bin
+# uvicorn userà il socket già aperto da systemd su fd=3
+ExecStart=/opt/netprobe/venv/bin/uvicorn main:app --fd 3
+Restart=always
+RestartSec=2
 
 [Install]
+# Con socket-activation non serve abilitare la service al boot
 WantedBy=multi-user.target

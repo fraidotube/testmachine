@@ -1,0 +1,18 @@
+[Unit]
+Description=TestMachine Flow Collector (nfcapd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netprobe
+Group=netprobe
+ExecStartPre=/usr/bin/install -d -m 2770 -o netprobe -g netprobe /var/lib/nfsen-ng/profiles-data/live/netprobe
+# Foreground, layout compatibile nfsen-ng: subdir standard, rotazione 300s
+ExecStart=/usr/bin/nfcapd -w /var/lib/nfsen-ng/profiles-data/live/netprobe -S 1 -p 2055 -t 300
+Restart=on-failure
+Nice=5
+IOSchedulingClass=best-effort
+
+[Install]
+WantedBy=multi-user.target

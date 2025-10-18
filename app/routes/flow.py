@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 from fastapi import APIRouter, Request, Form, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from html import escape
-import subprocess, time, re, datetime
+import subprocess, time, re, datetime, os, json
 
 from routes.auth import verify_session_cookie, _load_users
 
@@ -164,6 +164,35 @@ def _timeseries(rows: list[dict], t_start: int, t_end: int, step: int = 60):
     labels = [time.strftime("%H:%M:%S", time.localtime(x)) for x in bins]
     return {"labels": labels, "bytes": byts}
 
+# ----------------- helpers gestione dati -----------------
+def _parse_age(s: str) -> int:
+    s = (s or "24h").strip().lower()
+    num = int(re.sub(r"[^0-9]", "", s) or "24")
+    if s.endswith("m"): return num * 60
+    if s.endswith("h"): return num * 3600
+    if s.endswith("d"): return num * 86400
+    return num * 3600  # default ore
+
+def _cleanup_flows_older_than(seconds: int) -> dict:
+    cutoff = int(time.time()) - max(0, seconds)
+    removed = 0
+    try:
+        for root, _, files in os.walk(FLOWS_DIR):
+            for fn in files:
+                if not fn.startswith("nfcapd."):
+                    continue
+                fp = os.path.join(root, fn)
+                try:
+                    st = os.stat(fp)
+                    if int(st.st_mtime) < cutoff:
+                        os.unlink(fp)
+                        removed += 1
+                except Exception:
+                    continue
+        return {"ok": True, "removed": removed}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "removed": removed}
+
 # ----------------- API JSON -----------------
 @router.get("/api/status", response_class=JSONResponse)
 def api_status():
@@ -190,6 +219,19 @@ def api_timeseries(window: str = Query("60m"), step: int = Query(60)):
     serie = _timeseries(rows, t_start, t_end, step=max(10, step))
     return {"window": window, "step": step, "series": serie}
 
+@router.get("/api/export")
+def api_export(window: str = Query("15m")):
+    ts, te, _, _ = _time_range_str(window)
+    rc, out, err = _runp(["nfdump", "-R", FLOWS_DIR, "-t", f"{ts}-{te}", "-o", "csv"], timeout=40)
+    if rc != 0:
+        out = f"# nfdump rc={rc}\n{err}"
+    fname = f"flows_{window}.csv"
+    return StreamingResponse(
+        iter([out]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'}
+    )
+
 # ----------------- actions (solo admin) -----------------
 @router.post("/exporter/start", response_class=JSONResponse)
 def exporter_start(request: Request, iface: str = Form(...)):
@@ -213,6 +255,14 @@ def exporter_stop(request: Request):
         if ok:
             stopped.append(unit)
     return {"stopped": stopped, "ok": True}
+
+@router.post("/admin/cleanup", response_class=JSONResponse)
+def admin_cleanup(request: Request, older: str = Form("24h")):
+    if not _require_admin(request):
+        return {"ok": False, "error": "forbidden"}
+    secs = _parse_age(older)
+    res = _cleanup_flows_older_than(secs)
+    return res
 
 # ----------------- UI -----------------
 def _page_head(title: str) -> str:
@@ -272,6 +322,26 @@ def flow_dashboard(request: Request, window: str = Query("15m"), n: int = Query(
       <a class='btn small' href='/flow?window=1h&n=__N__'>1h</a>
       <a class='btn small' href='/flow?window=6h&n=__N__'>6h</a>
       <a class='btn small' href='/flow?window=24h&n=__N__'>24h</a>
+    </div>
+  </div>
+
+  <div class='card'>
+    <h2>Gestione dati</h2>
+    <form id="cleanForm" class="row">
+      <div>
+        <label>Mantieni ultimi</label>
+        <input name="older" value="24h" class="mono" style="width:90px" />
+      </div>
+      <button class="btn danger" type="submit">Pulisci vecchi</button>
+    </form>
+    <div id="flash2" class="small mono" style="margin-top:6px;"></div>
+
+    <div class="row" style="margin-top:10px">
+      <label>Export CSV</label>
+      <a class="btn small" href="/flow/api/export?window=15m" target="_blank">15m</a>
+      <a class="btn small" href="/flow/api/export?window=1h"  target="_blank">1h</a>
+      <a class="btn small" href="/flow/api/export?window=6h"  target="_blank">6h</a>
+      <a class="btn small" href="/flow/api/export?window=24h" target="_blank">24h</a>
     </div>
   </div>
 
@@ -390,6 +460,25 @@ async function refreshAll(){
       flash.textContent = "Errore di rete";
     }
     setTimeout(()=>{ flash.textContent=""; }, 2500);
+  });
+})();
+
+// Cleanup vecchi file (solo admin)
+(function(){
+  const form = document.getElementById("cleanForm");
+  const flash = document.getElementById("flash2");
+  form.addEventListener("submit", async (ev)=>{
+    ev.preventDefault();
+    try{
+      const r = await fetch("/flow/admin/cleanup", { method:"POST", body: new FormData(form) });
+      let txt=""; let ok=false;
+      try{ const j=await r.json(); ok=!!j.ok; txt = ok ? ("Rimossi: "+(j.removed||0)) : (j.error||"Errore"); }catch(_){}
+      flash.textContent = ok ? ("OK - "+txt) : ("Errore - "+txt);
+      refreshAll();
+    }catch(_){
+      flash.textContent = "Errore di rete";
+    }
+    setTimeout(()=>{ flash.textContent=""; }, 3000);
   });
 })();
 

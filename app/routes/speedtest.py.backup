@@ -2,25 +2,27 @@ from fastapi import APIRouter, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from pathlib import Path
 from html import escape
-import subprocess, os, json, time, shlex
+import subprocess, os, json, time
 
 router = APIRouter(prefix="/speedtest", tags=["speedtest"])
 
-SPEED_DIR = Path("/var/lib/netprobe/speedtest")
-STATE_FILE = SPEED_DIR / "state.json"   # {"pid":int|null, "started":ts, "result":{...}|null, "tool":"ookla|pycli"}
+SPEED_DIR  = Path("/var/lib/netprobe/speedtest")
+STATE_FILE = SPEED_DIR / "state.json"   # {"pid":..., "started":..., "result":..., "tool":..., "error":...}
 LOG_FILE   = SPEED_DIR / "last.log"
 
 def _ensure_dir():
     SPEED_DIR.mkdir(parents=True, exist_ok=True)
     if not STATE_FILE.exists():
-        STATE_FILE.write_text(json.dumps({"pid": None, "started": None, "result": None, "tool": None}, indent=2), encoding="utf-8")
+        STATE_FILE.write_text(json.dumps(
+            {"pid": None, "started": None, "result": None, "tool": None, "error": None}, indent=2
+        ), encoding="utf-8")
 
 def _load_state():
     _ensure_dir()
     try:
         return json.loads(STATE_FILE.read_text("utf-8"))
     except Exception:
-        return {"pid": None, "started": None, "result": None, "tool": None}
+        return {"pid": None, "started": None, "result": None, "tool": None, "error": None}
 
 def _save_state(st: dict):
     tmp = STATE_FILE.with_suffix(".tmp")
@@ -48,26 +50,21 @@ def _page_head(title: str) -> str:
           "<div class='spacer'><a class='btn secondary' href='/'>Home</a></div>"
         "</div>"
     )
-def _pick_cmd() -> tuple[list[str], str]:
-    """Ritorna (cmd, toolname). Preferisce Ookla CLI se disponibile."""
-    import shutil
-    # 1) Ookla CLI
-    if shutil.which("speedtest"):
-        # -f json = output JSON
-        # -p no   = no progress bar su stdout
-        # --accept-license/--accept-gdpr = niente prompt interattivi
-        return (
-	    ["/usr/bin/speedtest",
-	     "-f", "json", "-p", "no",
-	     "--accept-license", "--accept-gdpr"],
-	    "ookla"
-	)
 
-    # 2) Python speedtest-cli (fallback)
+def _pick_cmd() -> tuple[list[str], str]:
+    """Ritorna (cmd, toolname). Preferisce Ookla CLI con path assoluto."""
+    import shutil, os
+    sp = "/usr/bin/speedtest"
+    if os.path.isfile(sp) and os.access(sp, os.X_OK):
+        return ([sp, "-f", "json", "-p", "no", "--accept-license", "--accept-gdpr"], "ookla")
+    sp = shutil.which("speedtest")
+    if sp:
+        return ([sp, "-f", "json", "-p", "no", "--accept-license", "--accept-gdpr"], "ookla")
+
+    # fallback python speedtest-cli
     py = shutil.which("python3") or "python3"
     code = (
-        "import json,sys; "
-        "import speedtest as s; "
+        "import json,sys; import speedtest as s; "
         "st=s.Speedtest(); st.get_servers(); st.get_best_server(); "
         "d=st.download(); u=st.upload(pre_allocate=False); "
         "p=st.results.ping; sv=st.results.server or {}; "
@@ -75,45 +72,27 @@ def _pick_cmd() -> tuple[list[str], str]:
     )
     return ([py, "-c", code], "pycli")
 
-
-import shutil, signal
+import signal
 
 @router.get("/", response_class=HTMLResponse)
 def page():
     html = _page_head("Speedtest") + """
 <style>
-  /* palette verde */
-  :root{
-    --st-a:#10b981; /* teal/green */
-    --st-b:#059669;
-  }
-  .card--st{
-    background: linear-gradient(160deg, rgba(16,185,129,.22), rgba(5,150,105,.10));
-    border:1px solid rgba(16,185,129,.30);
-  }
-  .hero {display:flex;gap:14px;align-items:center;justify-content:space-between}
+  :root{ --st-a:#10b981; --st-b:#059669; }
+  .card--st{ background: linear-gradient(160deg, rgba(16,185,129,.22), rgba(5,150,105,.10));
+             border:1px solid rgba(16,185,129,.30); }
+  .hero{display:flex;gap:14px;align-items:center;justify-content:space-between}
   .pill{padding:4px 10px;border-radius:999px;background:rgba(255,255,255,.08);font-size:.9rem;border:1px solid rgba(255,255,255,.1)}
   .kv{display:grid;grid-template-columns:120px 1fr;gap:6px;margin-top:10px}
   .big{font-size:1.8rem;font-weight:700}
-
-  /* progress “finto” a fasi (indeterminato, ma con step: ping->down->up) */
   .meter{height:10px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;position:relative}
-  .meter .bar{
-    position:absolute;left:0;top:0;height:100%;width:28%;
-    background:linear-gradient(90deg, var(--st-a), var(--st-b));
-    filter:saturate(120%);
-    animation:pulse 1.1s ease-in-out infinite;
-  }
-  @keyframes pulse { 
-    0%{transform:translateX(-40%)} 
-    50%{transform:translateX(120%)} 
-    100%{transform:translateX(-40%)} 
-  }
-
-  /* badge fasi */
+  .meter .bar{position:absolute;left:0;top:0;height:100%;width:28%;background:linear-gradient(90deg, var(--st-a), var(--st-b));filter:saturate(120%);animation:pulse 1.1s ease-in-out infinite}
+  @keyframes pulse{0%{transform:translateX(-40%)}50%{transform:translateX(120%)}100%{transform:translateX(-40%)}}
   .phase{display:inline-flex;gap:6px;align-items:center;margin-top:6px}
   .dot{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.25)}
   .on{background:var(--st-a)}
+  .err{color:#fca5a5}
+  .muted2{opacity:.8}
 </style>
 
 <div class='grid'>
@@ -124,9 +103,7 @@ def page():
     </div>
     <p class='muted'>Misura ping, download e upload.</p>
 
-    <div id="pre-box">
-      <button class='btn' onclick='startTest()'>Avvia test</button>
-    </div>
+    <div id="pre-box"><button class='btn' onclick='startTest()'>Avvia test</button></div>
 
     <div id="run-box" style="display:none">
       <div class="meter" style="margin:10px 0 6px"><div class="bar"></div></div>
@@ -148,57 +125,50 @@ def page():
       <button class='btn' style="margin-top:10px" onclick='startTest()'>Riesegui</button>
     </div>
 
-    <div class='muted' id='tool-note' style="margin-top:10px"></div>
+    <div class='muted2' id='tool-note' style="margin-top:10px"></div>
+    <div class='err' id='err-note' style="margin-top:6px;display:none"></div>
   </div>
 </div>
 </div>
 <script>
 let timer=null, phase=0;
-
-/* formattatori */
 function humanBitsps(bps){ if(!bps) return "-"; const u=["bps","Kbps","Mbps","Gbps","Tbps"]; let i=0,v=Number(bps); while(v>=1000 && i<u.length-1){ v/=1000; i++; } return v.toFixed(2)+" "+u[i]; }
 function setPhase(p){ phase=p; for(let i=1;i<=3;i++){ document.getElementById('ph'+i).classList.toggle('on', i<=p); }}
 
-/* stato */
 async function status(){
   const r = await fetch('/speedtest/status');
   const js = await r.json();
   const running = !!js.running;
-  document.getElementById('tool-note').textContent = js.tool ? ("Tool: "+js.tool) : "";
-  document.getElementById('state-pill').textContent = running ? "In esecuzione" : "Pronto";
-  document.getElementById('state-pill').style.background = running ? "rgba(16,185,129,.2)" : "rgba(255,255,255,.08)";
-  document.getElementById('pre-box').style.display = running ? "none":""; 
-  document.getElementById('run-box').style.display = running ? "":"none";
+  const err = js.error || null;
 
-  // fasi "simulate": 1s ping, 4s download, 4s upload (se non abbiamo progress reali)
+  document.getElementById('tool-note').textContent = js.tool ? ("Tool: "+js.tool) : "";
+  document.getElementById('state-pill').textContent = err ? "Errore" : (running ? "In esecuzione" : "Pronto");
+  document.getElementById('state-pill').style.background = err ? "rgba(239,68,68,.20)" : (running ? "rgba(16,185,129,.2)" : "rgba(255,255,255,.08)");
+  document.getElementById('pre-box').style.display = running ? "none":"";
+  document.getElementById('run-box').style.display  = running ? "":"none";
+
+  document.getElementById('err-note').style.display = err ? "" : "none";
+  if(err){ document.getElementById('err-note').textContent = "Errore: " + err + " (vedi /var/lib/netprobe/speedtest/last.log)"; }
+
   if(running){
     const t = Date.now() % 9000;
-    if(t<1000) setPhase(1);
-    else if(t<5000) setPhase(2);
-    else setPhase(3);
+    if(t<1000) setPhase(1); else if(t<5000) setPhase(2); else setPhase(3);
   }
 
   if(js.result){
     setPhase(3);
     const res = js.result;
-    // server
-    if(res.server){
-      const s = res.server;
-      document.getElementById('sv').textContent = [s.name, s.location].filter(Boolean).join(" · ");
-    }
-    // ISP e IP
+    if(res.server){ const s = res.server; document.getElementById('sv').textContent = [s.name, s.location].filter(Boolean).join(" · "); }
     document.getElementById('isp').textContent = res.isp || "-";
     const iface = res.interface || {};
     const iptxt = [iface.internalIp, iface.externalIp].filter(Boolean).join(" → ");
     document.getElementById('ips').textContent = iptxt || "-";
 
-    // ping/jitter/loss
     const pingMs = (res.ping?.latency ?? res.ping ?? res.ping_ms ?? null);
-    document.getElementById('pg').textContent = pingMs!=null ? pingMs.toFixed(2)+" ms" : "-";
-    document.getElementById('jit').textContent = res.ping?.jitter!=null ? res.ping.jitter.toFixed(2)+" ms" : "-";
+    document.getElementById('pg').textContent = pingMs!=null ? Number(pingMs).toFixed(2)+" ms" : "-";
+    document.getElementById('jit').textContent = (res.ping?.jitter!=null) ? Number(res.ping.jitter).toFixed(2)+" ms" : "-";
     document.getElementById('pl').textContent  = (res.packetLoss!=null) ? (res.packetLoss+" %") : "-";
 
-    // velocità (Ookla JSON: bandwidth in byte/s)
     let d = res.download?.bandwidth!=null ? res.download.bandwidth*8 : (res.download ?? null);
     let u = res.upload?.bandwidth!=null   ? res.upload.bandwidth*8   : (res.upload   ?? null);
     document.getElementById('dl').textContent = humanBitsps(d);
@@ -219,24 +189,17 @@ status();
 </body></html>
 """
 
-
     return HTMLResponse(html)
-
 
 @router.get("/status", response_class=JSONResponse)
 def st_status():
     st = _load_state()
     running = _alive(st.get("pid"))
     if not running and st.get("pid"):
-        # se processo terminato, azzera il pid
         st["pid"] = None
         _save_state(st)
-    return {"running": running, "result": st.get("result"), "tool": st.get("tool")}
-
-def _start_subprocess_and_detach(cmd:list[str]):
-    with open(LOG_FILE, "w") as log:
-        # avvia processo che al termine scrive il risultato nel file stato
-        return subprocess.Popen(cmd, stdout=log, stderr=log, preexec_fn=os.setsid)
+    return {"running": running, "result": st.get("result"), "tool": st.get("tool"),
+            "started": st.get("started"), "error": st.get("error")}
 
 @router.post("/start", response_class=JSONResponse)
 def start():
@@ -245,8 +208,8 @@ def start():
     if _alive(st.get("pid")):
         return {"ok": True, "running": True}
 
-    # reset stato
     st["result"] = None
+    st["error"]  = None
     st["started"] = int(time.time())
     _save_state(st)
 
@@ -254,54 +217,65 @@ def start():
     st["tool"] = tool
     _save_state(st)
 
-    # scrive un wrapper python che esegue il test e aggiorna state.json
     wrapper = SPEED_DIR / "run_speedtest.py"
     wrapper_code = f"""
 import json, subprocess, pathlib, sys, os, time
 STATE = pathlib.Path({json.dumps(str(STATE_FILE))})
 LOG   = pathlib.Path({json.dumps(str(LOG_FILE))})
 CMD   = {json.dumps(cmd)}
+ENV   = dict(os.environ); ENV.update({{"LC_ALL":"C","LANG":"C"}})
 
-# esegui comando e cattura stdout/stderr
+# esegui e scrivi log in streaming
+OUT, ERR, errtxt = "", "", None
 try:
-    p = subprocess.run(CMD, capture_output=True, text=True, timeout=600)
-    OUT = (p.stdout or "")
-    ERR = (p.stderr or "")
+    with LOG.open("w") as lf:
+        lf.write("CMD="+json.dumps(CMD)+"\\n")
+    p = subprocess.Popen(CMD, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=ENV)
+    chunks=[]
+    while True:
+        buf = p.stdout.read(4096)
+        if not buf: break
+        chunks.append(buf)
+        try:
+            with LOG.open("a") as lf: lf.write(buf)
+        except Exception: pass
+    rc = p.wait(timeout=700)
+    OUT = "".join(chunks)
+    if rc != 0:
+        errtxt = f"exit_status={{rc}}"
 except Exception as e:
-    OUT, ERR = "", str(e)
+    OUT, ERR, errtxt = "", str(e), str(e)
+    try:
+        with LOG.open("a") as lf: lf.write("\\nERR: "+str(e))
+    except Exception: pass
 
-# salva log completo
+# parse JSON
+result = {{}}
 try:
-    LOG.write_text(OUT + ("\\n" if OUT else "") + ERR)
-except Exception:
-    pass
+    if OUT.strip():
+        result = json.loads(OUT.strip())
+except Exception as ex:
+    errtxt = (errtxt or "") + f" parse_failed: {{ex}}"
 
-# parse JSON da stdout; se fallisce, risultato vuoto ma log pieno
-try:
-    result = json.loads(OUT.strip() or "{{}}")
-except Exception:
-    result = {{}}
-
-# aggiorna state.json
+# aggiorna stato
 try:
     st = json.loads(STATE.read_text())
 except Exception:
-    st = {{"pid": None, "started": None, "result": None, "tool": None}}
+    st = {{"pid": None, "started": None, "result": None, "tool": None, "error": None}}
 st["result"] = result
 st["pid"] = None
+st["error"] = errtxt
 STATE.write_text(json.dumps(st, indent=2))
 """
     wrapper.write_text(wrapper_code, encoding="utf-8")
 
-    # lancia wrapper in background (sessione dedicata)
     proc = subprocess.Popen(
-        ["/usr/bin/env", "python3", str(wrapper)],
+        ["/usr/bin/python3", str(wrapper)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=os.setsid
     )
     st["pid"] = proc.pid
     _save_state(st)
     return {"ok": True, "running": True, "pid": proc.pid, "tool": tool}
-
 
 @router.post("/cancel", response_class=JSONResponse)
 def cancel():

@@ -1,32 +1,21 @@
 [Unit]
-Description=TestMachine Flow Exporter (softflowd) on %I
-After=network-online.target
-Wants=network-online.target
+Description=TestMachine Flow Exporter (softflowd) on %i
+After=network-online.target netprobe-flow-collector.service
+Wants=network-online.target netprobe-flow-collector.service
 
 [Service]
 Type=simple
 User=root
-Group=netprobe
+# softflowd necessita di raw socket → root. (Se vuoi non-root serve CAP_NET_RAW + ambient caps)
 
-# socket di controllo per diagnostica
-ExecStartPre=/usr/bin/install -d -m 0755 -o root -g netprobe /run/softflowd
+# Timeout di export aggressivi per demo + verbose v9
+ExecStart=/usr/sbin/softflowd -D -i %i -n 127.0.0.1:2055 -v 9 -T full \
+  -t tcp.fin=10 -t tcp.rst=10 -t udp=10 -t icmp=10 -t general=30 -t expint=5 \
+  -c /run/softflowd.%i.ctl
 
-# NOTE:
-# -D  -> resta in foreground (così systemd lo tiene "active")
-# -t  -> timeout in forma nome=valore (qui: general=60, expint=15)
-# -T full -> tracking completo
-# -v 9 -> NetFlow v9 (OK per nfcapd)
-ExecStart=/usr/sbin/softflowd -D -i %I -n 127.0.0.1:2055 -v 9 -T full \
-          -t general=60 -t expint=15 \
-          -c /run/softflowd/%I.ctl
-
-Restart=on-failure
-RestartSec=1s
-
-# hardening blando che non rompe libpcap
-ProtectSystem=full
-ProtectHome=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_PACKET
+Restart=always
+RestartSec=2
 
 [Install]
+# NON abilitiamo istanze al boot: la UI le avvia al bisogno (systemctl start netprobe-flow-exporter@IFACE)
 WantedBy=multi-user.target

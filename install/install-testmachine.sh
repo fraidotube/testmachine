@@ -12,10 +12,10 @@ step(){ echo -e "\n== $* =="; }
 APP_DIR=/opt/netprobe
 APP_USER=netprobe
 APP_GROUP=netprobe
-API_PORT=9000
-WEB_PORT=${WEB_PORT:-8080}
+API_PORT=9000           # API in socket-activation su 127.0.0.1:9000
+WEB_PORT=${WEB_PORT:-8080}  # Apache listener esterno
 
-# --- APT: assicurati che ci siano ESATTAMENTE le tre righe indicate (main contrib non-free) ---
+# --- APT: repository standard ---
 step "APT: assicurazione repository standard (main contrib non-free)"
 . /etc/os-release
 CODENAME="${VERSION_CODENAME:-bookworm}"
@@ -31,11 +31,8 @@ grep -qxF "$need1" "$SRC" || echo "$need1" >> "$SRC"
 grep -qxF "$need2" "$SRC" || echo "$need2" >> "$SRC"
 grep -qxF "$need3" "$SRC" || echo "$need3" >> "$SRC"
 
-# Nota: NON aggiungiamo 'non-free-firmware' qui perché l'utente ha confermato
-# che il set corretto per il suo ambiente è solo main/contrib/non-free.
-
-# --- pacchetti base ---
-step "APT update & install base"
+# --- pacchetti base + flow deps ---
+step "APT update & install base + flow"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -44,14 +41,13 @@ apt-get install -y --no-install-recommends \
   apache2 apache2-utils \
   smokeping fping \
   network-manager \
-  tshark wireshark-common tcpdump libcap2-bin
+  tshark wireshark-common tcpdump libcap2-bin \
+  psmisc nfdump softflowd
 
-# --- pacchetti Net Mapper (nmap/arp-scan/dns/snmp/bonjour/oui) ---
+# --- Net Mapper deps ---
 step "Install Net Mapper deps"
-# Su Debian 12 'dnsutils' è transizionale -> usiamo 'bind9-dnsutils'.
 apt-get install -y --no-install-recommends \
   nmap arp-scan bind9-dnsutils snmp avahi-utils ieee-data
-# 'snmp-mibs-downloader' viene installato SOLO se disponibile nei repo configurati
 if candidate="$(apt-cache policy snmp-mibs-downloader 2>/dev/null | awk '/Candidate:/ {print $2}')"; then
   if [[ -n "$candidate" && "$candidate" != "(none)" ]]; then
     step "Installo snmp-mibs-downloader (opzionale)"
@@ -61,7 +57,7 @@ if candidate="$(apt-cache policy snmp-mibs-downloader 2>/dev/null | awk '/Candid
   fi
 fi
 
-# --- SNMP MIBs: abilita caricamento (Debian ha spesso 'mibs :' disabilitante) ---
+# --- SNMP: abilita caricamento MIB ---
 step "SNMP: abilito caricamento MIB (commento 'mibs :')"
 SNMPCFG=/etc/snmp/snmp.conf
 if [[ -f "$SNMPCFG" ]]; then
@@ -78,7 +74,7 @@ id -u "${APP_USER}" >/dev/null 2>&1 || useradd -r -g "${APP_GROUP}" -d "${APP_DI
 step "Sorgenti applicazione in ${APP_DIR}"
 install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" "${APP_DIR}"
 if [[ ! -d "${APP_DIR}/.git" ]]; then
-  git clone https://github.com/fraidotube/testmachine.git "${APP_DIR}"
+  sudo -u "${APP_USER}" -H git clone https://github.com/fraidotube/testmachine.git "${APP_DIR}"
 else
   pushd "${APP_DIR}" >/dev/null
   sudo -u "${APP_USER}" -H git fetch --all || true
@@ -94,38 +90,27 @@ python3 -m venv "${APP_DIR}/venv"
 if [[ -f "${APP_DIR}/requirements.txt" ]]; then
   "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
 else
+  # dipendenze minime dell’app web (flow non richiede libs extra Python)
   "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart speedtest-cli
 fi
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
 
-# --- Systemd: API ---
-step "Systemd unit netprobe-api"
-cat >/etc/systemd/system/netprobe-api.service <<EOF
-[Unit]
-Description=TestMachine API (FastAPI)
-After=network.target
-
-[Service]
-User=${APP_USER}
-Group=${APP_GROUP}
-WorkingDirectory=${APP_DIR}/app
-ExecStart=${APP_DIR}/venv/bin/uvicorn main:app --host 127.0.0.1 --port ${API_PORT}
-Restart=on-failure
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl enable --now netprobe-api
+# --- Systemd: deploy dal repo (socket-activation API + collector/exporter) ---
+step "Systemd deploy (API socket + collector/exporter) via apply.sh"
+if [[ -x "${APP_DIR}/deploy/systemd/apply.sh" ]]; then
+  bash "${APP_DIR}/deploy/systemd/apply.sh"
+else
+  echo "ERRORE: ${APP_DIR}/deploy/systemd/apply.sh non trovato o non eseguibile." >&2
+  exit 2
+fi
 
 # --- Apache: moduli + porta + vhost ---
 step "Apache moduli"
-a2enmod proxy proxy_http headers rewrite cgid >/dev/null
+a2enmod proxy proxy_http headers rewrite cgid >/dev/null || true
 
 step "Apache porta ${WEB_PORT}"
 sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
-grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
+grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 
 step "Site testmachine.conf"
 cat >/etc/apache2/sites-available/testmachine.conf <<EOF
@@ -177,7 +162,7 @@ chmod 0660 /etc/smokeping/config.d/* 2>/dev/null || true
 chown -R smokeping:"${APP_GROUP}" /var/lib/smokeping
 chmod 2770 /var/lib/smokeping
 
-# Targets default
+# Targets default SmokePing
 if [[ ! -s /etc/smokeping/config.d/Targets ]]; then
   cat >/etc/smokeping/config.d/Targets <<'EOF'
 + TestMachine
@@ -237,8 +222,8 @@ if [[ ! -f /var/lib/netprobe/netmap/index.json ]]; then
   chmod 0660 /var/lib/netprobe/netmap/index.json
 fi
 
-# --- SUDOERS ---
-step "Sudoers per netprobe"
+# --- SUDOERS: consentire controllo collector/exporter dalla UI ---
+step "Sudoers per netprobe (API/Apache/Time/NM + collector/exporter)"
 cat >/etc/sudoers.d/netprobe-ops <<'EOF'
 Defaults:netprobe !requiretty
 Cmnd_Alias NP_COPY = \
@@ -249,9 +234,15 @@ Cmnd_Alias NP_SVC = \
   /bin/systemctl reload apache2, /usr/bin/systemctl reload apache2, \
   /bin/systemctl restart apache2, /usr/bin/systemctl restart apache2, \
   /bin/systemctl reload smokeping, /usr/bin/systemctl reload smokeping, \
-  /bin/systemctl try-reload-or-restart systemd-timesyncd, /usr/bin/systemctl try-reload-or-restart systemd-timesyncd
+  /bin/systemctl try-reload-or-restart systemd-timesyncd, /usr/bin/systemctl try-reload-or-restart systemd-timesyncd, \
+  /bin/systemctl start netprobe-flow-collector,   /usr/bin/systemctl start netprobe-flow-collector, \
+  /bin/systemctl stop  netprobe-flow-collector,   /usr/bin/systemctl stop  netprobe-flow-collector, \
+  /bin/systemctl restart netprobe-flow-collector, /usr/bin/systemctl restart netprobe-flow-collector, \
+  /bin/systemctl start netprobe-flow-exporter@*,  /usr/bin/systemctl start netprobe-flow-exporter@*, \
+  /bin/systemctl stop  netprobe-flow-exporter@*,  /usr/bin/systemctl stop  netprobe-flow-exporter@*, \
+  /bin/systemctl restart netprobe-flow-exporter@*,/usr/bin/systemctl restart netprobe-flow-exporter@*
 Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
-Cmnd_Alias NP_NM = /usr/bin/nmcli *
+Cmnd_Alias NP_NM   = /usr/bin/nmcli *
 netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM
 EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
@@ -285,14 +276,14 @@ PY
   chgrp "${APP_GROUP}" /etc/netprobe/users.json
 fi
 
-# --- servizi ---
-step "Riavvio servizi"
+# --- Riavvio servizi web ---
+step "Riavvio servizi (Apache/SmokePing)"
 systemctl restart smokeping || true
 systemctl reload apache2 || systemctl restart apache2
 
-# --- check ---
+# --- Check finali ---
 step "Check finali"
-systemctl is-active --quiet netprobe-api && echo "API OK"
+systemctl is-active --quiet netprobe-api.socket && echo "API socket OK"
 systemctl is-active --quiet smokeping && echo "SmokePing OK"
 apachectl -t || true
 echo -n "HTTP / (via :${WEB_PORT}): "; curl -sI "http://127.0.0.1:${WEB_PORT}/" | head -n1 || true

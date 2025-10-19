@@ -10,8 +10,10 @@ Appliance di diagnostica di rete per Debian:
 - **Diagnostica VoIP**: indice chiamate SIP, **SIP ladder**, dettagli registrazioni/chiamate, reindicizzazione PCAP; prime statistiche **RTP** (beta)  
 - **Net Mapper**: scoperta host e servizi (ARP/Nmap), **Vendor OUI**, reverse DNS, **OS guess**, esportazione JSON/CSV, dashboard  
 - **Speedtest**: download/upload, latency/jitter/loss con storico locale  
+- **Flow Monitor (NetFlow v9)**: grafici e contatori basati su **softflowd → nfcapd/nfdump**  
 - **Rete (WAN/LAN & Bridge)**: configurazione interfacce via NetworkManager (**nmcli**), VLAN opzionale, **porta di sniffing** dedicata  
-- **Impostazioni di sistema**: cambio **porta Apache**, **timezone** e **NTP** (timesyncd)
+- **Impostazioni di sistema**: cambio **porta Apache**, **timezone**, **NTP** (timesyncd), **Impostazioni avanzate**: **riavvio macchina** e **cambio hostname**  
+- **Logs (/logs)**: **audit log** consultabile dalla UI con **export CSV/JSONL**
 
 > UI predefinita: `http://<IP_SERVER>:8080/`  
 > Credenziali iniziali: **admin / admin** (cambiale subito).
@@ -32,7 +34,8 @@ L’installer prepara:
   - `/opt/netprobe` (app)
   - `/var/lib/netprobe` (stato)
   - `/var/lib/netprobe/pcap` (catture)
-  - **`/var/lib/netprobe/voip`** e **`/var/lib/netprobe/voip/captures`** (VoIP)
+  - `/var/lib/netprobe/voip` e `/var/lib/netprobe/voip/captures` (VoIP)
+  - `/var/lib/netprobe/logs` (audit log)
   - `/etc/netprobe/users.json`, `/etc/netprobe/pcap.json` (config)
 - **Capability/sudoers** per strumenti di cattura/scansione (es. `dumpcap`, `arp-scan`, `nmap`) dove necessario
 
@@ -63,21 +66,21 @@ nameserver 8.8.8.8
 " > /etc/resolv.conf
 ```
 
-> **Nota**: se `/etc/resolv.conf` è un *symlink* (p.es. a systemd-resolved), puoi forzare un file reale così:
->
-> ```
-> rm -f /etc/resolv.conf
-> printf "nameserver 1.1.1.1
+**Nota**: se `/etc/resolv.conf` è un *symlink* (p.es. a systemd-resolved), puoi forzare un file reale così:
+
+```
+rm -f /etc/resolv.conf
+printf "nameserver 1.1.1.1
 nameserver 8.8.8.8
 " > /etc/resolv.conf
-> ```
->
-> Verifica con:
->
-> ```
-> ping -c1 1.1.1.1
-> ping -c1 google.com
-> ```
+```
+
+Verifica con:
+
+```
+ping -c1 1.1.1.1
+ping -c1 google.com
+```
 
 
 ## 3) Installazione
@@ -207,7 +210,7 @@ Strumenti per ispezionare registrazioni e chiamate **SIP** a partire da PCAP, co
 > **Suggerimenti**
 > - Per analisi RTP, preferisci flussi **non SRTP** o fornire chiavi/PCAP in chiaro.  
 > - Per traffico su porte dinamiche, amplia il filtro (es. `udp portrange 10000-20000`).  
-> - **sngrep** è installato sul sistema per analisi da shell.
+> - `sngrep` è installato sul sistema per analisi da shell.
 
 ### Troubleshooting VoIP
 
@@ -272,18 +275,58 @@ Gestione interfacce via **NetworkManager** (`nmcli`):
 > Le modifiche applicano profili `wan0` / `lan0`. Usare con cautela su sistemi in produzione.
 
 
-## 10) Impostazioni di sistema (Porta, Timezone, NTP)
+## 10) Impostazioni di sistema (Porta, Timezone, NTP, Avanzate)
 
 Pagina **Impostazioni**:
 
 - **Porta Apache** della Web UI (default **8080**) con **redirect** automatico post-cambio  
 - **Timezone** di sistema  
 - **NTP** via `systemd-timesyncd` (server, stato, sync)
+- **Impostazioni avanzate**:
+  - **Riavvia macchina** (azione con conferma)
+  - **Cambia hostname** (richiede privilegi admin; la propagazione può richiedere riavvio)
 
 > Le azioni sono applicate tramite **sudoers** limitato e controlli di sicurezza.
 
 
-## 11) SmokePing (latenza)
+## 11) Flow Monitor (NetFlow v9)
+
+Monitor in tempo quasi reale dei **flow** di rete con grafici aggiornati periodicamente.
+
+### Pipeline effettiva
+
+- **Esportatore**: `softflowd` (es. su `ens4`) → **UDP 127.0.0.1:2055** (**NetFlow v9**)  
+- **Collector**: `nfcapd` scrive i file ruotando ~**60s** in  
+  `/var/lib/nfsen-ng/profiles-data/live/netprobe`  
+- **Symlink** comodo:  
+  `/var/lib/netprobe/flows` → `/var/lib/nfsen-ng/profiles-data/live/netprobe`
+
+**Nota**: dopo l’avvio, i grafici possono restare vuoti finché non arriva la **prima rotazione** (~60s).
+
+### Verifiche rapide
+
+```
+# Collector in ascolto su UDP/2055
+ss -lunp | grep 2055
+
+# Flows presenti nell'ultimo file ruotato
+ls -1 /var/lib/netprobe/flows | tail -n 3
+nfdump -r "/var/lib/netprobe/flows/$(ls -1 /var/lib/netprobe/flows | tail -n 1)" -o long -c 10
+```
+
+
+## 12) Logs (/logs)
+
+Pagina per consultare i **log di audit** dell’applicazione.
+
+- File principale: `/var/lib/netprobe/logs/audit.jsonl`  
+- **Filtro/ricerca** dalla UI e **export** in **CSV** o **JSONL**  
+- La card dei log è visibile nella riga inferiore della pagina con **larghezza piena**
+
+> I log includono azioni e eventi salienti della Web UI, utili per audit e diagnostica.
+
+
+## 13) SmokePing (latenza)
 
 ### Accesso ai grafici
 
@@ -354,7 +397,7 @@ journalctl -u apache2 -n 200 --no-pager
 ```
 
 
-## 12) Impostazioni Sniffer
+## 14) Impostazioni Sniffer
 
 Pagina **/pcap/settings**:
 
@@ -369,7 +412,7 @@ Pagina **/pcap/settings**:
 I valori sono in `/etc/netprobe/pcap.json`.
 
 
-## 13) Gestione servizi
+## 15) Gestione servizi
 
 ```
 # API (FastAPI / Uvicorn)
@@ -399,7 +442,7 @@ journalctl -u netprobe-api -n 200 --no-pager
 ```
 
 
-## 14) Sicurezza
+## 16) Sicurezza
 
 - Cattura con **dumpcap** + **capabilities** (no root).  
 - Solo **interfacce enumerate** sono valide.  
@@ -408,10 +451,11 @@ journalctl -u netprobe-api -n 200 --no-pager
 - Possibile disabilitare i **filtri BPF** custom.  
 - Limita l’accesso alla UI (password robuste; opzionalmente **Access Control** su Apache).  
 - **Net Mapper**: esegui scansioni solo su reti autorizzate.  
-- **VoIP**: i PCAP possono contenere dati sensibili (numerazioni, SIP URI, SDP); trattali in conformità alle policy.
+- **VoIP**: i PCAP possono contenere dati sensibili (numerazioni, SIP URI, SDP); trattali in conformità alle policy.  
+- **Flow Monitor**: i dati di flusso includono metadati (IP, porte, tempi); gestiscili in modo conforme alle policy.
 
 
-## 15) Troubleshooting generale
+## 17) Troubleshooting generale
 
 **503 Service Unavailable (Apache)** – API giù o non avviata:
 
@@ -445,8 +489,21 @@ capinfos -h
 
 **Net Mapper** – Se `arp-scan` o `nmap` falliscono, verifica capability/sudoers e connettività L2.
 
+**Flow Monitor** – Nessun dato nei grafici?
 
-## 16) Disinstallazione
+```
+# Collector attivo?
+ss -lunp | grep 2055
+
+# Ultimi file ruotati presenti?
+ls -1 /var/lib/netprobe/flows | tail -n 5
+
+# Dati dentro l'ultimo file
+nfdump -r "/var/lib/netprobe/flows/$(ls -1 /var/lib/netprobe/flows | tail -n 1)" -o long -c 10
+```
+
+
+## 18) Disinstallazione
 
 ```
 # stop servizi
@@ -468,10 +525,10 @@ setcap -r /usr/bin/dumpcap || true
 ```
 
 
-## 17) Sviluppo
+## 19) Sviluppo
 
 ```
-git clone https://github.com/<TUO_USER_O_ORG>/testmachine.git
+git clone https://github.com/fraidotube/testmachine.git
 cd testmachine
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt

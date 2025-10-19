@@ -37,7 +37,7 @@ apt-get update
 apt-get install -y --no-install-recommends \
   git ca-certificates curl sudo jq debconf-utils \
   python3 python3-venv python3-pip \
-  apache2 apache2-utils libapache2-mod-proxy-html \
+  apache2 apache2-utils \
   smokeping fping \
   network-manager \
   tshark wireshark-common tcpdump libcap2-bin \
@@ -189,7 +189,7 @@ deploy_systemd
 # APACHE
 # =====================================================================
 step "Apache: moduli & porta ${WEB_PORT}"
-a2enmod proxy proxy_http headers rewrite cgid >/dev/null || true
+a2enmod proxy proxy_http proxy_wstunnel headers rewrite cgid >/dev/null || true
 sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
 grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 

@@ -1,6 +1,6 @@
 # /opt/netprobe/app/main.py
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -45,10 +45,12 @@ PATH_ROLES = {
     "/flow/exporter/stop":  ["admin"],
     "/flow":                ["admin", "operator", "viewer"],  # sola pagina/GET
     "/logs": ["admin", "operator", "viewer"],
+    "/cacti-dbpass": ["admin"],                   # <-- NUOVO: lettura password DB Cacti (solo admin)
+    "/cacti": ["admin", "operator", "viewer"],
 }
 
 # Percorsi sempre liberi
-ALLOW_PREFIXES = ("/static", "/auth/login", "/auth/logout", "/favicon.ico")
+ALLOW_PREFIXES = ("/static", "/auth/login", "/auth/logout", "/favicon.ico", "/cacti")
 
 @app.middleware("http")
 async def auth_gatekeeper(request: Request, call_next):
@@ -100,15 +102,30 @@ app.include_router(wan_router, prefix="/wan")
 app.include_router(lan_router, prefix="/lan")
 app.include_router(settings_router, prefix="/settings")
 app.include_router(auth_router)
-app.include_router(pcap_router)          # ha già prefix="/pcap"
-app.include_router(status_router)        # NEW: espone /status/summary
+app.include_router(pcap_router)          
+app.include_router(status_router)        
 app.include_router(speedtest_router)
-app.include_router(voip_router)  # ha già prefix="/voip"
+app.include_router(voip_router)  
 app.include_router(netmap_router)
 app.include_router(flow_router)
 app.include_router(logs_router)
 
+# ---- NUOVO: endpoint per leggere la password DB di Cacti (solo admin via RBAC) ----
+import re
+from pathlib import Path
 
+CACTI_DEBIAN_PHP = Path("/etc/cacti/debian.php")
+
+@app.get("/cacti-dbpass", response_class=JSONResponse)
+def cacti_dbpass(request: Request):
+    try:
+        txt = CACTI_DEBIAN_PHP.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"Impossibile leggere {CACTI_DEBIAN_PHP}: {e}"}, status_code=500)
+    m = re.search(r'^\$database_password\s*=\s*["\']([^"\']+)["\']', txt, re.M)
+    if not m:
+        return JSONResponse({"ok": False, "error": "Campo $database_password non trovato"}, status_code=404)
+    return JSONResponse({"ok": True, "password": m.group(1)})
 
 # (Opzionale) pannello admin Smokeping
 try:

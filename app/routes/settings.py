@@ -2,7 +2,7 @@
 
 import os, re, time
 from fastapi import APIRouter, Request, Form, BackgroundTasks
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from html import escape
 from util.shell import run
 from util.audit import log_event
@@ -11,6 +11,7 @@ from routes.auth import verify_session_cookie, _load_users
 router = APIRouter()
 
 REPO_DIR = "/opt/netprobe"
+CACTI_DEBIAN_PHP = "/etc/cacti/debian.php"  # path file Cacti
 
 # ------------------- helpers comuni -------------------
 def head(title:str)->str:
@@ -57,7 +58,6 @@ def _current_port() -> int:
 
 # ------------------- Nuove utility (clock/NTP) -------------------
 def _time_status():
-    """Ritorna dict con local_time, timezone e ntp_service."""
     d = {"local_time":"n/d", "timezone":"Etc/UTC", "ntp_service":"timesyncd"}
     rc, out, _ = run(["/usr/bin/timedatectl"])
     if rc == 0:
@@ -113,7 +113,6 @@ def _git_short_status():
 def settings_home(request: Request):
     is_admin = _require_admin(request)
 
-    # card porta (invariata)
     cur = _current_port()
     port_card = f"""
     <div class='card'>
@@ -126,7 +125,6 @@ def settings_home(request: Request):
       <p class='notice'>Dopo il cambio porta verrai reindirizzato automaticamente.</p>
     </div>"""
 
-    # card orario & NTP (come prima)
     st = _time_status()
     tz_current = st["timezone"]
     tz_opts = _tz_options(tz_current)
@@ -153,7 +151,6 @@ def settings_home(request: Request):
       <p class='muted'>Supportato <code>systemd-timesyncd</code>.</p>
     </div>"""
 
-    # card manutenzione (NUOVA) — solo admin
     host = os.uname().nodename
     git_info = _git_short_status() if is_admin else "—"
     maint_card = f"""
@@ -185,11 +182,57 @@ def settings_home(request: Request):
       <p class='muted'>Esegue: <code>git fetch --all --prune</code>, <code>git reset --hard origin/&lt;branch&gt;</code>, <code>apply.sh</code>, riavvio servizio API.</p>
     </div>"""
 
+    # Card Cacti (NOTA: stringa normale, NON f-string, così le { } JS non rompono)
+    cacti_card = """
+    <div class='card' style='grid-column:1 / -1'>
+      <h2>Cacti (DB password)</h2>
+      <p class='muted'>Legge la password dell'utente DB <b>cacti</b> da <code>/etc/cacti/debian.php</code>.
+         Solo amministratori. La password dell'utente <b>admin</b> dell'UI web al primo accesso è la stessa.</p>
+      <div class='row' style='gap:8px; align-items:flex-end; flex-wrap:wrap'>
+        <input id='cactiPw' class='mono' type='password' style='min-width:320px' placeholder='••••••••' readonly/>
+        <button class='btn' type='button' onclick='showCactiPw()'>Mostra</button>
+        <button class='btn secondary' type='button' onclick='copyCactiPw()'>Copia</button>
+      </div>
+      <p id='cactiPwMsg' class='muted' style='margin-top:6px'></p>
+    </div>
+    <script>
+    async function showCactiPw(){
+      const msg = document.getElementById('cactiPwMsg');
+      msg.textContent = '';
+      try{
+        const r = await fetch('/settings/cacti/dbpass');
+        const t = await r.text();
+        let js;
+        try{ js = JSON.parse(t); }catch(_e){ js = {ok:false, error:t}; }
+        if(js.ok){
+          const el = document.getElementById('cactiPw');
+          el.type = 'text';
+          el.value = js.password || '';
+          msg.textContent = 'Letta correttamente.';
+        }else{
+          alert('Errore: '+(js.error||'operazione non riuscita'));
+        }
+      }catch(e){
+        alert('Errore: '+e);
+      }
+    }
+    function copyCactiPw(){
+      const el = document.getElementById('cactiPw');
+      if(!el.value) return;
+      navigator.clipboard.writeText(el.value).then(()=>{
+        const msg = document.getElementById('cactiPwMsg');
+        msg.textContent = 'Copiata negli appunti.';
+      });
+    }
+    </script>
+    """
+
     html = head("Impostazioni") + f"""
     <div class='grid'>
       {port_card}
       {clock_card}
       {maint_card}
+      {cacti_card}
     </div></div></body></html>"""
     return HTMLResponse(html)
 
@@ -246,7 +289,6 @@ Listen {port}
     with open(tmp_ports,"w") as f: f.write(ports_txt)
     with open(tmp_vhost,"w") as f: f.write(vhost_txt)
     background_tasks.add_task(_apply_port_change, tmp_ports, tmp_vhost, bak_ports, bak_vhost)
-    # audit intent (l'esito reale è asinc nel background task)
     actor = verify_session_cookie(request) or "unknown"
     ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
     log_event("settings/port", ok=True, actor=actor, ip=ip, detail=f"port={port}", req_path=str(request.url))
@@ -311,7 +353,6 @@ def _patch_etc_hosts(new_host: str):
     replaced = False
     for ln in txt.splitlines():
         if ln.strip().startswith("127.0.1.1"):
-            # sostituisci mapping 127.0.1.1 esistente
             lines.append(f"127.0.1.1\t{new_host}")
             replaced = True
         else:
@@ -360,24 +401,18 @@ def _do_update(branch: str, log_path: str):
         return rc
 
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
-
-    # 1) sync codice
     _run(["/usr/bin/git","-C",REPO_DIR,"fetch","--all","--prune"])
     _run(["/usr/bin/git","-C",REPO_DIR,"reset","--hard", f"origin/{branch}"])
 
-    # 2) se esiste l'installer, eseguilo in modo non interattivo
     installer = os.path.join(REPO_DIR, "install-testmachine.sh")
     if os.path.exists(installer):
-        # se non è eseguibile, usiamo bash
         if os.access(installer, os.X_OK):
             _run(["sudo","-n","/usr/bin/env","DEBIAN_FRONTEND=noninteractive", installer, "--update"])
         else:
             _run(["sudo","-n","/usr/bin/env","DEBIAN_FRONTEND=noninteractive","/bin/bash", installer, "--update"])
 
-    # 3) apply delle unit + reload e restart api
     _run(["sudo","-n", os.path.join(REPO_DIR,"deploy/systemd/apply.sh")])
     _run(["sudo","-n","/bin/systemctl","daemon-reload"])
-    # ritardo minimo per non troncare la risposta HTTP
     time.sleep(0.8)
     _run(["sudo","-n","/bin/systemctl","restart","netprobe-api.service"])
 
@@ -404,3 +439,42 @@ def update_from_git(request: Request, background_tasks: BackgroundTasks, branch:
       <a class='btn' href='/settings/'>Torna alle Impostazioni</a>
     </div></div></div></body></html>"""
     return HTMLResponse(html)
+
+# ------------------- API: lettura password DB di Cacti -------------------
+_pw_re = re.compile(r"""(?m)^\s*\$database_password\s*=\s*(['"])(.*?)\1\s*;""")
+
+@router.get("/cacti/dbpass", response_class=JSONResponse)
+def cacti_db_password(request: Request):
+    """Legge la password DB di Cacti da /etc/cacti/debian.php (solo admin)."""
+    if not _require_admin(request):
+        return JSONResponse({"ok": False, "error": "Operazione non permessa"}, status_code=403)
+
+    # 1) prova lettura diretta
+    txt = None
+    try:
+        with open(CACTI_DEBIAN_PHP, "r", encoding="utf-8", errors="ignore") as f:
+            txt = f.read()
+    except Exception as e:
+        open_err = f"{e.__class__.__name__}: {e}"
+    else:
+        open_err = None
+
+    # 2) fallback con grep (senza sudo)
+    if txt is None:
+        rc, out, err = run(["/usr/bin/grep", r"^\$database_password", CACTI_DEBIAN_PHP])
+        if rc == 0:
+            txt = out
+        else:
+            log_event("settings/cacti/dbpass", ok=False, actor=verify_session_cookie(request) or "unknown",
+                      detail="read_failed", extra={"open_err": open_err or "", "rc_grep": rc, "stderr_grep": (err or "")[:160]})
+            return JSONResponse({"ok": False, "error": f"Impossibile leggere {CACTI_DEBIAN_PHP} (rc={rc})"}, status_code=500)
+
+    m = _pw_re.search(txt or "")
+    if not m:
+        log_event("settings/cacti/dbpass", ok=False, actor=verify_session_cookie(request) or "unknown",
+                  detail="regex_no_match")
+        return JSONResponse({"ok": False, "error": "Campo $database_password non trovato"}, status_code=404)
+
+    pw = m.group(2)
+    log_event("settings/cacti/dbpass", ok=True, actor=verify_session_cookie(request) or "unknown")
+    return JSONResponse({"ok": True, "password": pw})

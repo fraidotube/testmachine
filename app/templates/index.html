@@ -48,6 +48,10 @@
       background: linear-gradient(160deg, rgba(16,255,255,.25), rgba(5,150,105,.10));
       border: 1px solid rgba(16,185,129,.35);
     }
+    .card--cacti{
+      background: linear-gradient(160deg, rgba(34,197,94,.25), rgba(34,197,94,.08));
+      border: 1px solid rgba(34,197,94,.35);
+    }
     .tool-icon{width:26px;height:26px;opacity:.95}
 
     /* ---------- SETTINGS CARDS UNIFORME ---------- */
@@ -192,6 +196,16 @@
         <p class="muted">Top talkers, porte e protocolli (NetFlow/IPFIX).</p>
         <a class="btn" href="/flow">Apri Flow Monitor</a>
       </div>
+
+      <!-- NUOVO: Cacti -->
+      <div class="card card--tool card--cacti" style="margin-top:6px">
+        <h2>
+          <img class="tool-icon" src="/static/img/cacti.svg" alt="Cacti" onerror="this.style.display='none'">
+          Cacti
+        </h2>
+        <p class="muted">Frontend grafici SNMP/RRD integrato.</p>
+        <a class="btn" href="/cacti/">Apri Cacti</a>
+      </div>
       
     </div>
     
@@ -223,7 +237,7 @@
 
       <div class="card card--settings">
         <h2>Impostazioni Aggiuntive</h2>
-        <p class="muted">Cambia la porta web (default 8080) e altre preferenze.</p>
+        <p class="muted">Cambia la porta web (default 8080), NTP, Cacti Password e altre preferenze.</p>
         <a class="btn" href="/settings">Apri Impostazioni Aggiuntive</a>
       </div>
 
@@ -238,6 +252,8 @@
         <p class="muted">Parametri di cattura e retention file.</p>
         <a class="btn" href="/pcap/settings">Apri impostazioni capture</a>
       </div>
+
+      
 
       {% if user %}
       <div class="card card--settings">
@@ -339,6 +355,33 @@
       }catch(e){
         // in caso di errore, non rompiamo la UI
       }
+    }
+
+    // ---- NUOVO: lettura/copia password DB Cacti ----
+    async function showCactiPw(){
+      try{
+        const r = await fetch('/cacti-dbpass');
+        if(!r.ok){
+          const t = await r.text();
+          alert('Errore: '+t);
+          return;
+        }
+        const js = await r.json();
+        if(js.ok){
+          const el = document.getElementById('cactiPw');
+          el.type = 'text';
+          el.value = js.password || '';
+        }else{
+          alert('Errore: '+(js.error||'sconosciuto'));
+        }
+      }catch(e){
+        alert('Errore: '+e);
+      }
+    }
+    function copyCactiPw(){
+      const el = document.getElementById('cactiPw');
+      if(!el.value){ return; }
+      navigator.clipboard.writeText(el.value).then(()=>{},()=>{});
     }
 
     refreshStatus();

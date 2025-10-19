@@ -1,11 +1,17 @@
-import os, re
+# /opt/netprobe/app/routes/settings.py
+
+import os, re, time
 from fastapi import APIRouter, Request, Form, BackgroundTasks
 from fastapi.responses import HTMLResponse
-from util.shell import run
 from html import escape
+from util.shell import run
+from routes.auth import verify_session_cookie, _load_users
 
 router = APIRouter()
 
+REPO_DIR = "/opt/netprobe"
+
+# ------------------- helpers comuni -------------------
 def head(title:str)->str:
     return (
         "<!doctype html><html><head><meta charset='utf-8'/>"
@@ -18,6 +24,14 @@ def head(title:str)->str:
           "<div class='spacer'><a class='btn secondary' href='/'>Home</a></div>"
         "</div>"
     )
+
+def _require_admin(request: Request) -> bool:
+    user = verify_session_cookie(request)
+    if not user:
+        return False
+    users = _load_users()
+    roles = (users.get(user, {}) or {}).get("roles", []) or []
+    return "admin" in roles
 
 # ------------------- Utility esistenti (porta) -------------------
 def _self_ip() -> str:
@@ -67,7 +81,7 @@ def _tz_options(current: str) -> str:
         pass
     zones = sorted(set(zones))
     return "".join(
-        f"<option value='{z}' {'selected' if z==current else ''}>{z}</option>"
+        f"<option value='{escape(z)}' {'selected' if z==current else ''}>{escape(z)}</option>"
         for z in zones
     )
 
@@ -82,9 +96,22 @@ def _read_ntp_servers() -> str:
             pass
     return ""
 
+# ------------------- Git utils -------------------
+def _git_short_status():
+    s = []
+    rc, out, _ = run(["/usr/bin/git","-C",REPO_DIR,"rev-parse","--abbrev-ref","HEAD"])
+    if rc == 0: s.append(f"branch: {out.strip()}")
+    rc, out, _ = run(["/usr/bin/git","-C",REPO_DIR,"rev-parse","--short","HEAD"])
+    if rc == 0: s.append(f"commit: {out.strip()}")
+    rc, out, _ = run(["/usr/bin/git","-C",REPO_DIR,"status","-sb"])
+    if rc == 0: s.append(out.strip())
+    return "\n".join(s) if s else "n/d"
+
 # ------------------- Pagina Impostazioni -------------------
 @router.get("/", response_class=HTMLResponse)
 def settings_home(request: Request):
+    is_admin = _require_admin(request)
+
     # card porta (invariata)
     cur = _current_port()
     port_card = f"""
@@ -98,7 +125,7 @@ def settings_home(request: Request):
       <p class='notice'>Dopo il cambio porta verrai reindirizzato automaticamente.</p>
     </div>"""
 
-    # card orario & NTP (nuova)
+    # card orario & NTP (come prima)
     st = _time_status()
     tz_current = st["timezone"]
     tz_opts = _tz_options(tz_current)
@@ -106,8 +133,8 @@ def settings_home(request: Request):
     clock_card = f"""
     <div class='card'>
       <h2>Orario & NTP</h2>
-      <p>Ora server: <b>{st['local_time']}</b> — Fuso attuale: <b>{tz_current}</b></p>
-      <p>Servizio NTP: timesyncd — Server configurati: <b>{ntp_servers or 'n/d'}</b></p>
+      <p>Ora server: <b>{escape(st['local_time'])}</b> — Fuso attuale: <b>{escape(tz_current)}</b></p>
+      <p>Servizio NTP: timesyncd — Server configurati: <b>{escape(ntp_servers or 'n/d')}</b></p>
 
       <h3>Cambia fuso orario</h3>
       <form method='post' action='/settings/timezone'>
@@ -119,22 +146,54 @@ def settings_home(request: Request):
       <h3>Server NTP</h3>
       <form method='post' action='/settings/ntp'>
         <label>Elenco server (separa con spazio)</label>
-        <input name='servers' value='{ntp_servers or "0.pool.ntp.org 1.pool.ntp.org"}'/>
+        <input name='servers' value='{escape(ntp_servers or "0.pool.ntp.org 1.pool.ntp.org")}'/>
         <button class='btn' type='submit'>Applica NTP</button>
       </form>
       <p class='muted'>Supportato <code>systemd-timesyncd</code>.</p>
+    </div>"""
+
+    # card manutenzione (NUOVA) — solo admin
+    host = os.uname().nodename
+    git_info = _git_short_status() if is_admin else "—"
+    maint_card = f"""
+    <div class='card'>
+      <h2>Manutenzione & Aggiornamenti</h2>
+      {"<p class='muted'>Area riservata agli amministratori.</p>" if not is_admin else ""}
+
+      <h3>Hostname</h3>
+      <form method='post' action='/settings/hostname'>
+        <label>Hostname attuale</label>
+        <input value='{escape(host)}' readonly />
+        <label>Nuovo hostname</label>
+        <input name='hostname' placeholder='es. testmachine-01' pattern='[a-zA-Z0-9][a-zA-Z0-9-\\.]{0,251}[a-zA-Z0-9]' />
+        <button class='btn' type='submit' {"disabled" if not is_admin else ""}>Cambia hostname</button>
+      </form>
+
+      <h3>Riavvio sistema</h3>
+      <form method='post' action='/settings/reboot' onsubmit="return confirm('Riavviare ora la macchina?');">
+        <button class='btn danger' type='submit' {"disabled" if not is_admin else ""}>Riavvia</button>
+      </form>
+
+      <h3>Aggiornamento da GitHub</h3>
+      <p class='mono small'>Repo: {escape(REPO_DIR)}<br/>{escape(git_info)}</p>
+      <form method='post' action='/settings/update' onsubmit="return confirm('Aggiornare alla versione remota? I cambi non committati verranno persi.');">
+        <label>Branch remoto</label>
+        <input name='branch' value='main' />
+        <button class='btn' type='submit' {"disabled" if not is_admin else ""}>Aggiorna a origin/&lt;branch&gt;</button>
+      </form>
+      <p class='muted'>Esegue: <code>git fetch --all --prune</code>, <code>git reset --hard origin/&lt;branch&gt;</code>, <code>apply.sh</code>, riavvio servizio API.</p>
     </div>"""
 
     html = head("Impostazioni") + f"""
     <div class='grid'>
       {port_card}
       {clock_card}
+      {maint_card}
     </div></div></body></html>"""
     return HTMLResponse(html)
 
 # ------------------- Azioni porta (INVARIATE) -------------------
 def _apply_port_change(tmp_ports, tmp_vhost, bak_ports, bak_vhost):
-    import time
     time.sleep(0.7)
     r1 = run(["sudo","-n","/usr/bin/install","-m","644", tmp_ports, "/etc/apache2/ports.conf"])
     r2 = run(["sudo","-n","/usr/bin/install","-m","644", tmp_vhost, "/etc/apache2/sites-available/testmachine.conf"])
@@ -221,5 +280,107 @@ def set_ntp(servers: str = Form(...)):
     r1 = run(["sudo","-n","/usr/bin/install","-m","644", tmp, "/etc/systemd/timesyncd.conf"])
     r2 = run(["sudo","-n","/bin/systemctl","restart","systemd-timesyncd"])
     if r1[0]!=0 or r2[0]!=0:
-        return HTMLResponse(head("Impostazioni") + f"<div class='grid'><div class='card'><h2 class='err'>Errore nel configurare NTP</h2><pre>{r1}\n{r2}</pre><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
+        return HTMLResponse(head("Impostazioni") + f"<div class='grid'><div class='card'><h2 class='err'>Errore nel configurare NTP</h2><pre>{escape(str(r1))}\n{escape(str(r2))}</pre><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
     return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='ok'>Server NTP aggiornati</h2><a class='btn' href='/settings/'>Torna alle Impostazioni</a></div></div></div></body></html>")
+
+# ------------------- NUOVE Azioni: hostname / reboot / update -------------------
+_HOST_RE = re.compile(r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$")
+
+def _patch_etc_hosts(new_host: str):
+    try:
+        txt = open("/etc/hosts","r").read()
+    except Exception:
+        txt = ""
+    lines = []
+    replaced = False
+    for ln in txt.splitlines():
+        if ln.strip().startswith("127.0.1.1"):
+            # sostituisci mapping 127.0.1.1 esistente
+            lines.append(f"127.0.1.1\t{new_host}")
+            replaced = True
+        else:
+            lines.append(ln)
+    if not replaced:
+        lines.append(f"127.0.1.1\t{new_host}")
+    tmp = f"/var/lib/netprobe/tmp/hosts.{os.getpid()}"
+    os.makedirs("/var/lib/netprobe/tmp", exist_ok=True)
+    open(tmp,"w").write("\n".join(lines) + "\n")
+    run(["sudo","-n","/usr/bin/install","-m","644", tmp, "/etc/hosts"])
+
+@router.post("/hostname", response_class=HTMLResponse)
+def set_hostname(request: Request, hostname: str = Form(...)):
+    if not _require_admin(request):
+        return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Operazione non permessa</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
+
+    hn = (hostname or "").strip()
+    if not hn or len(hn) > 253 or not _HOST_RE.fullmatch(hn):
+        return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Hostname non valido</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
+
+    run(["sudo","-n","/usr/bin/hostnamectl","set-hostname", hn])
+    _patch_etc_hosts(hn)
+
+    return HTMLResponse(head("Impostazioni") + f"<div class='grid'><div class='card'><h2 class='ok'>Hostname impostato a <code>{escape(hn)}</code></h2><a class='btn' href='/settings/'>Torna</a></div></div></div></body></html>")
+
+def _delayed_reboot():
+    time.sleep(1.0)
+    run(["sudo","-n","/bin/systemctl","reboot"])
+
+@router.post("/reboot", response_class=HTMLResponse)
+def reboot_machine(request: Request, background_tasks: BackgroundTasks):
+    if not _require_admin(request):
+        return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Operazione non permessa</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
+    background_tasks.add_task(_delayed_reboot)
+    return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='ok'>Riavvio in corso…</h2><p>La pagina diventerà irraggiungibile per circa 1–2 minuti.</p></div></div></div></body></html>")
+
+def _do_update(branch: str, log_path: str):
+    logs = []
+    def _run(cmd):
+        rc, out, err = run(cmd)
+        logs.append(f"$ {' '.join(cmd)}\nRC={rc}\n{out}{err}")
+        return rc
+
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    # 1) sync codice
+    _run(["/usr/bin/git","-C",REPO_DIR,"fetch","--all","--prune"])
+    _run(["/usr/bin/git","-C",REPO_DIR,"reset","--hard", f"origin/{branch}"])
+
+    # 2) se esiste l'installer, eseguilo in modo non interattivo
+    installer = os.path.join(REPO_DIR, "install-testmachine.sh")
+    if os.path.exists(installer):
+        # se non è eseguibile, usiamo bash
+        if os.access(installer, os.X_OK):
+            _run(["sudo","-n","/usr/bin/env","DEBIAN_FRONTEND=noninteractive", installer, "--update"])
+        else:
+            _run(["sudo","-n","/usr/bin/env","DEBIAN_FRONTEND=noninteractive","/bin/bash", installer, "--update"])
+
+    # 3) apply delle unit + reload e restart api
+    _run(["sudo","-n", os.path.join(REPO_DIR,"deploy/systemd/apply.sh")])
+    _run(["sudo","-n","/bin/systemctl","daemon-reload"])
+    # ritardo minimo per non troncare la risposta HTTP
+    time.sleep(0.8)
+    _run(["sudo","-n","/bin/systemctl","restart","netprobe-api.service"])
+
+    open(log_path,"w").write("\n\n".join(logs))
+
+@router.post("/update", response_class=HTMLResponse)
+def update_from_git(request: Request, background_tasks: BackgroundTasks, branch: str = Form("main")):
+    if not _require_admin(request):
+        return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Operazione non permessa</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
+
+    b = (branch or "main").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._/\-]+", b):
+        return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Branch non valido</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
+
+    log_path = f"/var/lib/netprobe/tmp/update.{int(time.time())}.log"
+    background_tasks.add_task(_do_update, b, log_path)
+
+    html = head("Impostazioni") + f"""
+    <div class='grid'><div class='card'>
+      <h2>Aggiornamento avviato</h2>
+      <p>Sto sincronizzando <code>origin/{escape(b)}</code>, applicando le unit e riavviando l'API.</p>
+      <p>Log: <code>{escape(log_path)}</code></p>
+      <p class='muted'>Ricarica la pagina tra qualche secondo. Se l'API si riavvia, potresti vedere un errore temporaneo.</p>
+      <a class='btn' href='/settings/'>Torna alle Impostazioni</a>
+    </div></div></div></body></html>"""
+    return HTMLResponse(html)

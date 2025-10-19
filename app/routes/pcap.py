@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Form, Query
+from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from html import escape
 from pathlib import Path
@@ -7,6 +7,7 @@ from stat import S_IMODE
 
 
 router = APIRouter(prefix="/pcap", tags=["pcap"])
+from util.audit import log_event
 
 CAP_DIR   = Path("/var/lib/netprobe/pcap")
 META_FILE = CAP_DIR / "captures.json"
@@ -513,7 +514,7 @@ def _has_active_capture(meta: dict | None = None) -> bool:
     return False
 
 @router.post("/start")
-def start_capture(iface: str = Form(...), duration: int = Form(...), bpf: str = Form(""), snaplen: int = Form(262144)):
+def start_capture(request: Request, iface: str = Form(...), duration: int = Form(...), bpf: str = Form(""), snaplen: int = Form(262144)):
     _ensure_dirs()
 
     meta = _load_meta()
@@ -557,11 +558,21 @@ def start_capture(iface: str = Form(...), duration: int = Form(...), bpf: str = 
         "pid": proc.pid, "filter": bpf.strip(),
     })
     _save_meta(meta)
+    actor = None
+    try:
+        from routes.auth import verify_session_cookie as _vsc
+        actor = _vsc(request)
+    except Exception:
+        pass
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("pcap/start", ok=True, actor=actor or "unknown", ip=ip,
+              detail=f"iface={iface},duration={duration}", req_path=str(request.url),
+              extra={"snaplen": snaplen, "bpf": bpf.strip() or None, "file": fname})
     return RedirectResponse(url="/pcap", status_code=303)
 
 
 @router.post("/stop")
-def stop_capture(file: str = Form(None)):
+def stop_capture(request: Request, file: str = Form(None)):
     meta = _load_meta()
     stopped = 0
     for c in meta.get("captures", []):
@@ -578,7 +589,17 @@ def stop_capture(file: str = Form(None)):
                 except Exception:
                     pass
             stopped += 1
+    actor = None
+    try:
+        from routes.auth import verify_session_cookie as _vsc
+        actor = _vsc(request)
+    except Exception:
+        pass
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("pcap/stop", ok=True, actor=actor or "unknown", ip=ip,
+              detail=f"target={file or '*'}", req_path=str(request.url), extra={"stopped": stopped})
     return JSONResponse({"stopped": stopped})
+    
 
 @router.get("/status", response_class=JSONResponse)
 def status():
@@ -621,7 +642,7 @@ def download(file: str = Query(...)):
     return FileResponse(path, filename=file, media_type="application/octet-stream")
 
 @router.post("/delete")
-def delete_file(file: str = Form(...)):
+def delete_file(request: Request, file: str = Form(...)):
     file = os.path.basename(file)
     path = CAP_DIR / file
     try:
@@ -631,6 +652,15 @@ def delete_file(file: str = Form(...)):
     meta = _load_meta()
     meta["captures"] = [c for c in meta.get("captures", []) if c.get("file") != file]
     _save_meta(meta)
+    actor = None
+    try:
+        from routes.auth import verify_session_cookie as _vsc
+        actor = _vsc(request)
+    except Exception:
+        pass
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("pcap/delete", ok=True, actor=actor or "unknown", ip=ip,
+              detail=f"file={file}", req_path=str(request.url))
     return RedirectResponse(url="/pcap", status_code=303)
 
 @router.get("/summary", response_class=JSONResponse)
@@ -708,7 +738,7 @@ def pcap_settings():
     return HTMLResponse(html)
 
 @router.post("/settings")
-def pcap_settings_save(duration_max: int = Form(...),
+def pcap_settings_save(request: Request, duration_max: int = Form(...),
                        quota_gb: float = Form(...),
                        policy: str = Form(...),
                        poll_ms: int = Form(...),
@@ -723,6 +753,16 @@ def pcap_settings_save(duration_max: int = Form(...),
     cfg["poll_ms"] = max(250, min(int(poll_ms), 20000))
     cfg["allow_bpf"] = bool(allow_bpf)  # checkbox -> on/None
     _save_cfg(cfg)
+    actor = None
+    try:
+        from routes.auth import verify_session_cookie as _vsc
+        actor = _vsc(request)
+    except Exception:
+        pass
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("pcap/settings", ok=True, actor=actor or "unknown", ip=ip, req_path=str(request.url),
+              extra={"duration_max": cfg["duration_max"], "quota_gb": cfg["quota_gb"],
+                     "policy": cfg["policy"], "poll_ms": cfg["poll_ms"], "allow_bpf": cfg["allow_bpf"]})
     return RedirectResponse(url="/pcap/settings", status_code=303)
 
     

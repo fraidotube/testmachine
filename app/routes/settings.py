@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request, Form, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from html import escape
 from util.shell import run
+from util.audit import log_event
 from routes.auth import verify_session_cookie, _load_users
 
 router = APIRouter()
@@ -207,7 +208,7 @@ def _apply_port_change(tmp_ports, tmp_vhost, bak_ports, bak_vhost):
         run(["sudo","-n","/bin/systemctl","restart","apache2"])
 
 @router.post("/port")
-def set_port(background_tasks: BackgroundTasks, port: int = Form(...)):
+def set_port(request: Request, background_tasks: BackgroundTasks, port: int = Form(...)):
     tmpdir = "/var/lib/netprobe/tmp"
     os.makedirs(tmpdir, exist_ok=True)
     tag = str(os.getpid())
@@ -245,6 +246,10 @@ Listen {port}
     with open(tmp_ports,"w") as f: f.write(ports_txt)
     with open(tmp_vhost,"w") as f: f.write(vhost_txt)
     background_tasks.add_task(_apply_port_change, tmp_ports, tmp_vhost, bak_ports, bak_vhost)
+    # audit intent (l'esito reale è asinc nel background task)
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("settings/port", ok=True, actor=actor, ip=ip, detail=f"port={port}", req_path=str(request.url))
     ip = _self_ip()
     target = f"http://{ip}:{port}/settings/"
     html = head("Impostazioni") + f"""
@@ -259,16 +264,20 @@ Listen {port}
 
 # ------------------- Azioni nuove: timezone & NTP -------------------
 @router.post("/timezone", response_class=HTMLResponse)
-def set_timezone(tz: str = Form(...)):
+def set_timezone(request: Request, tz: str = Form(...)):
     if not tz or "/" not in tz or ".." in tz or "\\" in tz:
         return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Timezone non valida</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
     if not os.path.exists(f"/usr/share/zoneinfo/{tz}"):
         return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Timezone inesistente</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
-    run(["sudo","-n","/usr/bin/timedatectl","set-timezone", tz])
+    rc, out, err = run(["sudo","-n","/usr/bin/timedatectl","set-timezone", tz])
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("settings/timezone", ok=(rc==0), actor=actor, ip=ip, detail=f"tz={tz}", req_path=str(request.url),
+              extra={"rc": rc, "stderr": err[:200] if err else ""})
     return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='ok'>Timezone aggiornata</h2><a class='btn' href='/settings/'>Torna alle Impostazioni</a></div></div></div></body></html>")
 
 @router.post("/ntp", response_class=HTMLResponse)
-def set_ntp(servers: str = Form(...)):
+def set_ntp(request: Request, servers: str = Form(...)):
     sv = [s.strip() for s in re.split(r"[,\s]+", servers or "") if s.strip()]
     if not sv:
         return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Inserisci almeno un server</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
@@ -280,7 +289,14 @@ def set_ntp(servers: str = Form(...)):
     r1 = run(["sudo","-n","/usr/bin/install","-m","644", tmp, "/etc/systemd/timesyncd.conf"])
     r2 = run(["sudo","-n","/bin/systemctl","restart","systemd-timesyncd"])
     if r1[0]!=0 or r2[0]!=0:
+        actor = verify_session_cookie(request) or "unknown"
+        ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+        log_event("settings/ntp", ok=False, actor=actor, ip=ip, detail="apply_failed",
+                  req_path=str(request.url), extra={"rc_install": r1[0], "rc_restart": r2[0]})
         return HTMLResponse(head("Impostazioni") + f"<div class='grid'><div class='card'><h2 class='err'>Errore nel configurare NTP</h2><pre>{escape(str(r1))}\n{escape(str(r2))}</pre><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("settings/ntp", ok=True, actor=actor, ip=ip, detail="updated", req_path=str(request.url), extra={"servers": sv})
     return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='ok'>Server NTP aggiornati</h2><a class='btn' href='/settings/'>Torna alle Impostazioni</a></div></div></div></body></html>")
 
 # ------------------- NUOVE Azioni: hostname / reboot / update -------------------
@@ -316,8 +332,12 @@ def set_hostname(request: Request, hostname: str = Form(...)):
     if not hn or len(hn) > 253 or not _HOST_RE.fullmatch(hn):
         return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Hostname non valido</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
 
-    run(["sudo","-n","/usr/bin/hostnamectl","set-hostname", hn])
+    rc, out, err = run(["sudo","-n","/usr/bin/hostnamectl","set-hostname", hn])
     _patch_etc_hosts(hn)
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("settings/hostname", ok=(rc==0), actor=actor, ip=ip,
+              detail=f"hostname={hn}", req_path=str(request.url), extra={"rc": rc, "stderr": err[:200] if err else ""})
 
     return HTMLResponse(head("Impostazioni") + f"<div class='grid'><div class='card'><h2 class='ok'>Hostname impostato a <code>{escape(hn)}</code></h2><a class='btn' href='/settings/'>Torna</a></div></div></div></body></html>")
 

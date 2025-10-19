@@ -2,6 +2,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from html import escape
 from util.shell import run
+from util.audit import log_event
 
 router = APIRouter()
 
@@ -331,6 +332,7 @@ def page(request: Request):
 # ---- API: LAN ----------------------------------------------------------------
 @router.post("/set")
 def set_lan(
+    request: Request,
     mode: str = Form(...),
     ifname: str = Form(...),
     ip: str = Form(None),
@@ -401,6 +403,16 @@ def set_lan(
     rc_up, out_up, err_up = run(["sudo","-n","nmcli","con","up","lan0"])
     if rc_up != 0:
         return JSONResponse({"status":"error","out":out_up,"err":err_up}, status_code=500)
+    actor = None
+    try:
+        from routes.auth import verify_session_cookie as _vsc
+        actor = _vsc(request)
+    except Exception:
+        pass
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("lan/set", ok=True, actor=actor or "unknown", ip=ip, req_path=str(request.url),
+              extra={"mode": mode, "ifname": ifname, "vlan": bool(use_vlan), "vlan_id": vlan_id, "ip": ip, "prefix": prefix})
+        
 
     return HTMLResponse(
         head("LAN") +
@@ -413,6 +425,7 @@ def set_lan(
 # ---- API: LAN BRIDGE ---------------------------------------------------------
 @router.post("/bridge_set")
 def bridge_set(
+    request: Request,
     ifname: str = Form(...),
     has_ip: str = Form(None),
     ip: str = Form(None),
@@ -462,6 +475,15 @@ def bridge_set(
     rc_up, out_up, err_up = run(["sudo","-n","nmcli","con","up","lan-bridge0"])
     if rc_up != 0:
         return JSONResponse({"status":"error","out":out_up,"err":err_up}, status_code=500)
+    actor = None
+    try:
+        from routes.auth import verify_session_cookie as _vsc
+        actor = _vsc(request)
+    except Exception:
+        pass
+    xip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("lan/bridge_set", ok=True, actor=actor or "unknown", ip=xip, req_path=str(request.url),
+              extra={"ifname": ifname, "has_ip": bool(has_ip), "ip": ip, "prefix": prefix})
 
     return HTMLResponse(
         head("LAN") +

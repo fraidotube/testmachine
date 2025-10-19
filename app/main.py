@@ -14,6 +14,7 @@ from routes.speedtest import router as speedtest_router
 from routes.voip import router as voip_router
 from routes.netmap import router as netmap_router
 from routes.flow import router as flow_router
+from routes.logs import router as logs_router
 
 
 
@@ -43,6 +44,7 @@ PATH_ROLES = {
     "/flow/exporter/start": ["admin"],
     "/flow/exporter/stop":  ["admin"],
     "/flow":                ["admin", "operator", "viewer"],  # sola pagina/GET
+    "/logs": ["admin", "operator", "viewer"],
 }
 
 # Percorsi sempre liberi
@@ -104,6 +106,7 @@ app.include_router(speedtest_router)
 app.include_router(voip_router)  # ha già prefix="/voip"
 app.include_router(netmap_router)
 app.include_router(flow_router)
+app.include_router(logs_router)
 
 
 

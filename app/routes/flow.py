@@ -5,6 +5,7 @@ from html import escape
 import subprocess, time, re, datetime, os, json
 
 from routes.auth import verify_session_cookie, _load_users
+from util.audit import log_event
 
 router = APIRouter(prefix="/flow", tags=["flow"])
 
@@ -239,6 +240,10 @@ def exporter_start(request: Request, iface: str = Form(...)):
         return {"ok": False, "error": "forbidden"}
     _svc("start", "netprobe-flow-collector")
     ok, msg = _svc("restart", f"netprobe-flow-exporter@{iface}")
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("flow/exporter_start", ok=ok, actor=actor, ip=ip,
+              detail=f"iface={iface}", req_path=str(request.url), extra={"msg": msg})
     return {"ok": ok, "detail": msg}
 
 @router.post("/exporter/stop", response_class=JSONResponse)
@@ -254,6 +259,10 @@ def exporter_stop(request: Request):
         ok, _ = _svc("stop", unit)
         if ok:
             stopped.append(unit)
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("flow/exporter_stop", ok=True, actor=actor, ip=ip,
+              detail=f"stopped={len(stopped)}", req_path=str(request.url), extra={"units": stopped})
     return {"stopped": stopped, "ok": True}
 
 @router.post("/admin/cleanup", response_class=JSONResponse)
@@ -262,6 +271,11 @@ def admin_cleanup(request: Request, older: str = Form("24h")):
         return {"ok": False, "error": "forbidden"}
     secs = _parse_age(older)
     res = _cleanup_flows_older_than(secs)
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    ok = bool(res.get("ok"))
+    log_event("flow/cleanup", ok=ok, actor=actor, ip=ip,
+              detail=f"older={older}", req_path=str(request.url), extra=res)
     return res
 
 # ----------------- UI -----------------

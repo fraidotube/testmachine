@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Request, Form
+from util.audit import log_event
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pathlib import Path
 from html import escape
@@ -199,22 +200,39 @@ def login_form(request: Request, next: str = "/"):
     return HTMLResponse(content=html)
 
 @router.post("/login")
-def login_submit(response: Response, username: str = Form(...), password: str = Form(...), next: str = Form("/")):
+def login_submit(
+    request: Request,
+    response: Response,
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/")
+):
     users = _load_users()
     info = users.get(username)
+
     if not info or not _verify_password(info.get("pw", ""), password):
+        # audit: login fallito
+        ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+        log_event("auth/login", ok=False, actor=username, ip=ip, detail="invalid_credentials", req_path=str(request.url))
         return HTMLResponse("<script>history.back();alert('Credenziali non valide');</script>")
+
     token = _make_session(username)
     r = RedirectResponse(url=next if next else "/", status_code=303)
     r.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", secure=False, path="/", max_age=SESSION_MAX_AGE)
+
+    # audit: login OK
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("auth/login", ok=True, actor=username, ip=ip, req_path=str(request.url))
     return r
 
 @router.get("/logout")
-def logout(next: str = "/"):
+def logout(request: Request, next: str = "/"):
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("auth/logout", ok=True, actor=actor, ip=ip, req_path=str(request.url))
     r = RedirectResponse(url=next if next else "/", status_code=303)
     r.delete_cookie(COOKIE_NAME, path="/")
     return r
-
 # ---------- Pagina GESTIONE UTENTI ----------
 @router.get("/users", response_class=HTMLResponse)
 def users_page(request: Request):
@@ -316,7 +334,9 @@ def user_add(
     try:
         _save_users(users)
     except PermissionError:
+        log_event("auth/users/add", ok=False, actor=me, detail=f"add:{username}", extra={"role":role})
         return HTMLResponse("<script>alert('Permesso negato su /etc/netprobe');history.back()</script>")
+    log_event("auth/users/add", ok=True, actor=me, detail=f"add:{username}", extra={"role":role})
     return RedirectResponse(url="/auth/users", status_code=303)
 
 @router.post("/users/pass")
@@ -355,7 +375,9 @@ def user_pass(
     try:
         _save_users(users)
     except PermissionError:
+        log_event("auth/users/pass", ok=False, actor=me, detail=f"target:{target}")
         return HTMLResponse("<script>alert('Permesso negato su /etc/netprobe');history.back()</script>")
+    log_event("auth/users/pass", ok=True, actor=me, detail=f"target:{target}")
     return RedirectResponse(url="/auth/users", status_code=303)
 
 @router.post("/users/delete")
@@ -380,5 +402,7 @@ def user_delete(request: Request, username: str = Form(...)):
     try:
         _save_users(users)
     except PermissionError:
+        log_event("auth/users/delete", ok=False, actor=me, detail=f"delete:{username}")
         return HTMLResponse("<script>alert('Permesso negato su /etc/netprobe');history.back()</script>")
+    log_event("auth/users/delete", ok=True, actor=me, detail=f"delete:{username}")
     return RedirectResponse(url="/auth/users", status_code=303)

@@ -7,6 +7,7 @@ import subprocess, threading, time, json, re, ipaddress, shutil, os
 from collections import Counter
 
 from routes.auth import verify_session_cookie, _load_users
+from util.audit import log_event
 
 router = APIRouter(prefix="/netmap", tags=["netmap"])
 
@@ -736,6 +737,11 @@ def start(request: Request,
         tcp_top=bool(tcp_top), os_detect=bool(os_detect), note=note.strip()
     ), daemon=True)
     t.start()
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("netmap/start", ok=True, actor=actor, ip=ip, req_path=str(request.url),
+              detail=f"id={scan_id}", extra={"iface": iface, "cidr": cidr, "speed": speed,
+                                             "tcp_top": bool(tcp_top), "os_detect": bool(os_detect)})
     return RedirectResponse(url="/netmap", status_code=303)
 
 @router.get("/status", response_class=JSONResponse)
@@ -798,6 +804,10 @@ def update_note(request: Request, id: str = Form(...), note: str = Form("")):
             s["note"]=note.strip() or ""
             break
     _save_index(idx)
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("netmap/note", ok=True, actor=actor, ip=ip, req_path=str(request.url),
+              detail=f"id={id}", extra={"note_len": len(note or "")})
     return {"status":"ok"}
 
 @router.post("/delete", response_class=JSONResponse)
@@ -813,4 +823,7 @@ def delete(request: Request, id: str = Form(...)):
     idx=_load_index()
     idx["scans"]=[s for s in idx.get("scans",[]) if s.get("id")!=id]
     _save_index(idx)
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    log_event("netmap/delete", ok=True, actor=actor, ip=ip, req_path=str(request.url), detail=f"id={id}")
     return {"status":"ok"}

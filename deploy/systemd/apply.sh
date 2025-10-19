@@ -93,6 +93,21 @@ if command -v visudo >/dev/null 2>&1; then
   visudo -cf /etc/sudoers.d/netprobe >/dev/null
 fi
 
+# --- sudoers: gestione hostname per l'utente netprobe ---
+log "Configuro sudoers hostname…"
+cat >/etc/sudoers.d/netprobe-hostname <<'EOF'
+Defaults:netprobe !requiretty
+# Permetti a 'netprobe' di cambiare hostname e verificare lo stato
+netprobe ALL=(root) NOPASSWD: /usr/bin/hostnamectl set-hostname *, /usr/bin/hostnamectl status
+# Permetti di aggiornare /etc/hostname e /etc/hosts generati dalla UI
+netprobe ALL=(root) NOPASSWD: /usr/bin/install -m 644 /var/lib/netprobe/tmp/hostname.* /etc/hostname
+netprobe ALL=(root) NOPASSWD: /usr/bin/install -m 644 /var/lib/netprobe/tmp/hosts.* /etc/hosts
+EOF
+chmod 0440 /etc/sudoers.d/netprobe-hostname
+if command -v visudo >/dev/null 2>&1; then
+  visudo -cf /etc/sudoers.d/netprobe-hostname >/dev/null
+fi
+
 # --- ricarica unit ---
 log "systemctl daemon-reload"
 systemctl daemon-reload

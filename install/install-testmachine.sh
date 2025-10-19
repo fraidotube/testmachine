@@ -248,6 +248,17 @@ EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -c
 
+# --- SUDOERS: hostname (UI) ---
+step "Sudoers hostname (UI)"
+cat >/etc/sudoers.d/netprobe-hostname <<'EOF'
+Defaults:netprobe !requiretty
+netprobe ALL=(root) NOPASSWD: /usr/bin/hostnamectl set-hostname *, /usr/bin/hostnamectl status
+netprobe ALL=(root) NOPASSWD: /usr/bin/install -m 644 /var/lib/netprobe/tmp/hostname.* /etc/hostname
+netprobe ALL=(root) NOPASSWD: /usr/bin/install -m 644 /var/lib/netprobe/tmp/hosts.* /etc/hosts
+EOF
+chmod 440 /etc/sudoers.d/netprobe-hostname
+visudo -c
+
 # --- Speedtest (Ookla CLI) + fallback Python ---
 step "Installazione Ookla Speedtest CLI (repo packagecloud)"
 if ! command -v speedtest >/dev/null 2>&1; then

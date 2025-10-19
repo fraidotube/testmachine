@@ -47,7 +47,8 @@ ensure_collector_dropins() {
   if [[ ! -s "${d}/10-free-port.conf" ]]; then
     cat >"${d}/10-free-port.conf" <<'EOF'
 [Service]
-ExecStartPre=/usr/bin/fuser -k -n udp 2055 || true
+# ignora errori (porta già libera o psmisc assente)
+ExecStartPre=-/usr/bin/fuser -k -n udp 2055
 EOF
   fi
   # PIDFile + RuntimeDirectory + comando completo, se assente
@@ -67,13 +68,30 @@ ensure_collector_dropins
 
 # --- prepara directory e symlink flussi ---
 log "Preparo directory/symlink flussi…"
-# cartella padre (mancava sulle macchine vergini)
 install -d -m 0770 -o netprobe -g netprobe /var/lib/netprobe
-# destinazione stile nfsen-ng + ACL di gruppo
 install -d -m 2770 -o netprobe -g netprobe /var/lib/nfsen-ng/profiles-data/live/netprobe
-# symlink visto dalla UI
 ln -snf /var/lib/nfsen-ng/profiles-data/live/netprobe /var/lib/netprobe/flows
 chown -h netprobe:netprobe /var/lib/netprobe/flows || true
+
+# --- sudoers per la webapp (azioni senza password) ---
+log "Configuro sudoers per utente netprobe…"
+cat >/etc/sudoers.d/netprobe <<'EOF'
+Defaults:netprobe !requiretty
+netprobe ALL=(root) NOPASSWD: \
+  /usr/bin/systemctl start netprobe-flow-collector, \
+  /usr/bin/systemctl stop netprobe-flow-collector, \
+  /usr/bin/systemctl restart netprobe-flow-collector, \
+  /usr/bin/systemctl start netprobe-flow-exporter@*, \
+  /usr/bin/systemctl stop netprobe-flow-exporter@*, \
+  /usr/bin/systemctl restart netprobe-flow-exporter@*, \
+  /usr/bin/fuser -k -n udp 2055, \
+  /usr/bin/install -d -m 2770 -o netprobe -g netprobe /var/lib/nfsen-ng/profiles-data/live/netprobe, \
+  /bin/ln -snf /var/lib/nfsen-ng/profiles-data/live/netprobe /var/lib/netprobe/flows
+EOF
+chmod 0440 /etc/sudoers.d/netprobe
+if command -v visudo >/dev/null 2>&1; then
+  visudo -cf /etc/sudoers.d/netprobe >/dev/null
+fi
 
 # --- ricarica unit ---
 log "systemctl daemon-reload"
@@ -82,12 +100,12 @@ systemctl daemon-reload
 # --- chiudi eventuali nfcapd orfani / libera 2055 ---
 command -v fuser >/dev/null 2>&1 && /usr/bin/fuser -k -n udp 2055 || true
 pkill -f '(^| )nfcapd( |$)' 2>/dev/null || true
+systemctl reset-failed netprobe-flow-collector 2>/dev/null || true
 sleep 0.2
 
 # --- API: socket-activation ---
 log "Abilito e avvio netprobe-api.socket (service partirà on-demand)…"
 systemctl enable --now "${UNIT_API_SOCK}"
-# la service può restare disabilitata; parte al primo accept()
 systemctl stop "${UNIT_API_SVC}" 2>/dev/null || true
 
 # --- Collector: abilita e parti ora ---

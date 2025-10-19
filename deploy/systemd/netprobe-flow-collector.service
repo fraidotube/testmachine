@@ -7,6 +7,8 @@ Wants=network-online.target
 Type=simple
 User=netprobe
 Group=netprobe
+# Esegui SOLO i pre-start come root (creazione path/symlink), poi scendi a netprobe
+PermissionsStartOnly=true
 
 # Assicura path e symlink che usa la UI
 ExecStartPre=/usr/bin/install -d -m 2770 -o netprobe -g netprobe /var/lib/nfsen-ng/profiles-data/live/netprobe

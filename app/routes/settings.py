@@ -276,6 +276,7 @@ Listen {port}
     ProxyPassReverse /api/ws ws://127.0.0.1:9000/api/ws
     ProxyPass /smokeping/ !
     ProxyPass /cgi-bin/ !
+    ProxyPass /cacti/ !
     ProxyPass        / http://127.0.0.1:9000/
     ProxyPassReverse / http://127.0.0.1:9000/
     ErrorLog /var/log/apache2/testmachine-error.log

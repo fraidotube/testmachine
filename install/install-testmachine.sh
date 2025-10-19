@@ -12,66 +12,59 @@ step(){ echo -e "\n== $* =="; }
 APP_DIR=/opt/netprobe
 APP_USER=netprobe
 APP_GROUP=netprobe
-API_PORT=9000           # API in socket-activation su 127.0.0.1:9000
-WEB_PORT=${WEB_PORT:-8080}  # Apache listener esterno
+API_PORT=9000                    # API (socket activation) 127.0.0.1:9000
+WEB_PORT=${WEB_PORT:-8080}       # Apache listener esterno
 
-# --- APT: repository standard ---
-step "APT: assicurazione repository standard (main contrib non-free)"
+# =====================================================================
+# APT / SISTEMA
+# =====================================================================
+step "APT: abilito repo standard (main contrib non-free)"
 . /etc/os-release
 CODENAME="${VERSION_CODENAME:-bookworm}"
 SRC=/etc/apt/sources.list
 [[ -f "$SRC" ]] || touch "$SRC"
 cp -n "$SRC" "${SRC}.bak.$(date +%F_%H%M%S)" || true
-
 need1="deb http://deb.debian.org/debian ${CODENAME} main contrib non-free"
 need2="deb http://security.debian.org/debian-security ${CODENAME}-security main contrib non-free"
 need3="deb http://deb.debian.org/debian ${CODENAME}-updates main contrib non-free"
-
 grep -qxF "$need1" "$SRC" || echo "$need1" >> "$SRC"
 grep -qxF "$need2" "$SRC" || echo "$need2" >> "$SRC"
 grep -qxF "$need3" "$SRC" || echo "$need3" >> "$SRC"
 
-# --- pacchetti base + flow deps ---
-step "APT update & install base + flow"
+step "APT update & pacchetti base"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-  git ca-certificates curl sudo jq \
+  git ca-certificates curl sudo jq debconf-utils \
   python3 python3-venv python3-pip \
-  apache2 apache2-utils \
+  apache2 apache2-utils libapache2-mod-proxy-html \
   smokeping fping \
   network-manager \
   tshark wireshark-common tcpdump libcap2-bin \
-  psmisc nfdump softflowd
+  psmisc nfdump softflowd rrdtool snmp \
+  nmap arp-scan bind9-dnsutils avahi-utils ieee-data
 
-# --- Net Mapper deps ---
-step "Install Net Mapper deps"
-apt-get install -y --no-install-recommends \
-  nmap arp-scan bind9-dnsutils snmp avahi-utils ieee-data
+# opzionale: MIBs
 if candidate="$(apt-cache policy snmp-mibs-downloader 2>/dev/null | awk '/Candidate:/ {print $2}')"; then
-  if [[ -n "$candidate" && "$candidate" != "(none)" ]]; then
-    step "Installo snmp-mibs-downloader (opzionale)"
-    apt-get install -y --no-install-recommends snmp-mibs-downloader || true
-  else
-    echo "snmp-mibs-downloader non disponibile su ${CODENAME}; procedo senza."
-  fi
+  [[ -n "$candidate" && "$candidate" != "(none)" ]] && apt-get install -y --no-install-recommends snmp-mibs-downloader || true
 fi
 
-# --- SNMP: abilita caricamento MIB ---
-step "SNMP: abilito caricamento MIB (commento 'mibs :')"
+# SNMP: abilita caricamento MIB
+step "SNMP: commento 'mibs :' in /etc/snmp/snmp.conf"
 SNMPCFG=/etc/snmp/snmp.conf
 if [[ -f "$SNMPCFG" ]]; then
   cp -n "$SNMPCFG" "${SNMPCFG}.bak.$(date +%F_%H%M%S)" || true
   sed -i 's/^[[:space:]]*mibs[[:space:]]*:.*/# mibs :/g' "$SNMPCFG" || true
 fi
 
-# --- utente/gruppo app ---
-step "Utente/gruppo ${APP_USER}"
+# =====================================================================
+# UTENTE/REPO APP
+# =====================================================================
+step "Creo utente/gruppo ${APP_USER}"
 getent group  "${APP_GROUP}" >/dev/null || groupadd -r "${APP_GROUP}"
 id -u "${APP_USER}" >/dev/null 2>&1 || useradd -r -g "${APP_GROUP}" -d "${APP_DIR}" -s /usr/sbin/nologin "${APP_USER}"
 
-# --- sorgenti applicazione ---
-step "Sorgenti applicazione in ${APP_DIR}"
+step "Sorgenti app in ${APP_DIR}"
 install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" "${APP_DIR}"
 if [[ ! -d "${APP_DIR}/.git" ]]; then
   sudo -u "${APP_USER}" -H git clone https://github.com/fraidotube/testmachine.git "${APP_DIR}"
@@ -82,37 +75,125 @@ else
   popd >/dev/null
 fi
 
-# --- venv + deps ---
-step "Python venv + dipendenze"
+step "Python venv + deps"
 install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" "${APP_DIR}/venv"
 python3 -m venv "${APP_DIR}/venv"
 "${APP_DIR}/venv/bin/pip" install --upgrade pip
 if [[ -f "${APP_DIR}/requirements.txt" ]]; then
   "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
 else
-  # dipendenze minime dell’app web (flow non richiede libs extra Python)
   "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart speedtest-cli
 fi
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
 
-# --- Systemd: deploy dal repo (socket-activation API + collector/exporter) ---
-step "Systemd deploy (API socket + collector/exporter) via apply.sh"
-if [[ -x "${APP_DIR}/deploy/systemd/apply.sh" ]]; then
-  bash "${APP_DIR}/deploy/systemd/apply.sh"
-else
-  echo "ERRORE: ${APP_DIR}/deploy/systemd/apply.sh non trovato o non eseguibile." >&2
-  exit 2
-fi
+# =====================================================================
+# SYSTEMD (ex apply.sh, incorporato)
+# =====================================================================
+deploy_systemd() {
+  local SCRIPT_DIR="${APP_DIR}/deploy/systemd"
+  local SYSTEMD_DIR="/etc/systemd/system"
 
-# --- Apache: moduli + porta + vhost ---
-step "Apache moduli"
+  local UNIT_API_SVC="netprobe-api.service"
+  local UNIT_API_SOCK="netprobe-api.socket"
+  local UNIT_COLLECTOR="netprobe-flow-collector.service"
+  local UNIT_EXPORTER_TMPL="netprobe-flow-exporter@.service"
+
+  step "Systemd: copio unit file"
+  install -D -m 0644 "${SCRIPT_DIR}/${UNIT_API_SVC}"       "${SYSTEMD_DIR}/${UNIT_API_SVC}"
+  install -D -m 0644 "${SCRIPT_DIR}/${UNIT_API_SOCK}"      "${SYSTEMD_DIR}/${UNIT_API_SOCK}"
+  install -D -m 0644 "${SCRIPT_DIR}/${UNIT_COLLECTOR}"     "${SYSTEMD_DIR}/${UNIT_COLLECTOR}"
+  install -D -m 0644 "${SCRIPT_DIR}/${UNIT_EXPORTER_TMPL}" "${SYSTEMD_DIR}/${UNIT_EXPORTER_TMPL}"
+
+  # drop-in helper
+  copy_dropins() {
+    local name="$1"
+    local src="${SCRIPT_DIR}/${name}.d"
+    local dst="${SYSTEMD_DIR}/${name}.d"
+    if [[ -d "$src" ]]; then
+      mkdir -p "$dst"
+      cp -a "$src/." "$dst/"
+    fi
+  }
+  copy_dropins "netprobe-api.service"
+  copy_dropins "netprobe-api.socket"
+  copy_dropins "netprobe-flow-collector.service"
+  copy_dropins "netprobe-flow-exporter@.service"
+
+  # collector drop-ins minimi
+  local d="${SYSTEMD_DIR}/netprobe-flow-collector.service.d"
+  mkdir -p "$d"
+  [[ -s "${d}/10-free-port.conf" ]] || cat >"${d}/10-free-port.conf" <<'EOF'
+[Service]
+ExecStartPre=-/usr/bin/fuser -k -n udp 2055
+EOF
+  [[ -s "${d}/override.conf" ]] || cat >"${d}/override.conf" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/nfcapd -w /var/lib/nfsen-ng/profiles-data/live/netprobe -S 1 -p 2055 -t 60 -P /run/netprobe/nfcapd.pid
+RuntimeDirectory=netprobe
+PIDFile=/run/netprobe/nfcapd.pid
+Restart=on-failure
+RestartSec=2
+EOF
+
+  step "Prep directory/symlink flussi"
+  install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe
+  install -d -m 2770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/nfsen-ng/profiles-data/live/netprobe
+  ln -snf /var/lib/nfsen-ng/profiles-data/live/netprobe /var/lib/netprobe/flows
+  chown -h "${APP_USER}:${APP_GROUP}" /var/lib/netprobe/flows || true
+
+  step "Sudoers per flow & hostname"
+  cat >/etc/sudoers.d/netprobe <<'EOF'
+Defaults:netprobe !requiretty
+netprobe ALL=(root) NOPASSWD: \
+  /usr/bin/systemctl start netprobe-flow-collector, \
+  /usr/bin/systemctl stop netprobe-flow-collector, \
+  /usr/bin/systemctl restart netprobe-flow-collector, \
+  /usr/bin/systemctl start netprobe-flow-exporter@*, \
+  /usr/bin/systemctl stop netprobe-flow-exporter@*, \
+  /usr/bin/systemctl restart netprobe-flow-exporter@*, \
+  /usr/bin/fuser -k -n udp 2055, \
+  /usr/bin/install -d -m 2770 -o netprobe -g netprobe /var/lib/nfsen-ng/profiles-data/live/netprobe, \
+  /bin/ln -snf /var/lib/nfsen-ng/profiles-data/live/netprobe /var/lib/netprobe/flows
+EOF
+  chmod 0440 /etc/sudoers.d/netprobe
+  visudo -cf /etc/sudoers.d/netprobe >/dev/null || true
+
+  cat >/etc/sudoers.d/netprobe-hostname <<'EOF'
+Defaults:netprobe !requiretty
+netprobe ALL=(root) NOPASSWD: /usr/bin/hostnamectl set-hostname *, /usr/bin/hostnamectl status
+netprobe ALL=(root) NOPASSWD: /usr/bin/install -m 644 /var/lib/netprobe/tmp/hostname.* /etc/hostname
+netprobe ALL=(root) NOPASSWD: /usr/bin/install -m 644 /var/lib/netprobe/tmp/hosts.* /etc/hosts
+EOF
+  chmod 0440 /etc/sudoers.d/netprobe-hostname
+  visudo -cf /etc/sudoers.d/netprobe-hostname >/dev/null || true
+
+  step "systemctl daemon-reload & setup"
+  systemctl daemon-reload
+  command -v fuser >/dev/null 2>&1 && /usr/bin/fuser -k -n udp 2055 || true
+  pkill -f '(^| )nfcapd( |$)' 2>/dev/null || true
+  systemctl reset-failed netprobe-flow-collector 2>/dev/null || true
+  sleep 0.2
+
+  systemctl enable --now netprobe-api.socket
+  systemctl stop netprobe-api.service 2>/dev/null || true
+  systemctl enable --now netprobe-flow-collector || true
+  systemctl stop 'netprobe-flow-exporter@*' 2>/dev/null || true
+  for link in /etc/systemd/system/multi-user.target.wants/netprobe-flow-exporter@*.service; do
+    [[ -L "$link" ]] && systemctl disable "$(basename "$link")" || true
+  done
+}
+deploy_systemd
+
+# =====================================================================
+# APACHE
+# =====================================================================
+step "Apache: moduli & porta ${WEB_PORT}"
 a2enmod proxy proxy_http headers rewrite cgid >/dev/null || true
-
-step "Apache porta ${WEB_PORT}"
 sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
 grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 
-step "Site testmachine.conf"
+step "Site testmachine.conf (escludo /smokeping/ e /cacti/)"
 cat >/etc/apache2/sites-available/testmachine.conf <<EOF
 <VirtualHost *:${WEB_PORT}>
   ServerName testmachine
@@ -122,108 +203,41 @@ cat >/etc/apache2/sites-available/testmachine.conf <<EOF
 
   ProxyPreserveHost On
   RequestHeader set X-Forwarded-Proto "http"
+  ProxyPass        /api/ws ws://127.0.0.1:${API_PORT}/api/ws
+  ProxyPassReverse /api/ws ws://127.0.0.1:${API_PORT}/api/ws
   ProxyPass        / http://127.0.0.1:${API_PORT}/
   ProxyPassReverse / http://127.0.0.1:${API_PORT}/
 
+  # Non proxy verso l'app:
+  ProxyPass /smokeping/ !
+  ProxyPass /cgi-bin/   !
+  ProxyPass /cacti/     !
+
   <Location /smokeping/>
-    ProxyPass !
+    Require all granted
+  </Location>
+  <Location /cacti/>
     Require all granted
   </Location>
 </VirtualHost>
 EOF
 a2ensite testmachine.conf >/dev/null || true
-
-# --- SmokePing: conf Apache e permessi ---
-step "SmokePing: conf Apache + permessi"
 a2enconf smokeping >/dev/null || true
 
-# --- Packet capture: capability dumpcap ---
-step "Packet capture: abilita dumpcap non-root"
-setcap cap_net_raw,cap_net_admin+eip /usr/bin/dumpcap || true
-getcap /usr/bin/dumpcap || true
-getent group wireshark >/dev/null && usermod -aG wireshark "${APP_USER}" || true
-
-# --- Net Mapper: capability per arp-scan / nmap ---
-step "Net Mapper: capability per arp-scan e nmap (non-root)"
-command -v setcap >/dev/null 2>&1 || apt-get install -y libcap2-bin
-setcap cap_net_raw,cap_net_admin+eip /usr/sbin/arp-scan || true
-setcap cap_net_raw,cap_net_admin+eip /usr/bin/nmap || true
-getcap /usr/sbin/arp-scan || true
-getcap /usr/bin/nmap || true
-
-# --- gruppi/permessi per file e config ---
-usermod -aG "${APP_GROUP}" smokeping || true
-usermod -aG "${APP_GROUP}" www-data  || true
-
-install -d -m 2770 -o root -g "${APP_GROUP}" /etc/smokeping/config.d
-chown -R root:"${APP_GROUP}" /etc/smokeping/config.d
-chmod 0660 /etc/smokeping/config.d/* 2>/dev/null || true
-
-chown -R smokeping:"${APP_GROUP}" /var/lib/smokeping
-chmod 2770 /var/lib/smokeping
-
-# Targets default SmokePing
-if [[ ! -s /etc/smokeping/config.d/Targets ]]; then
-  cat >/etc/smokeping/config.d/Targets <<'EOF'
-+ TestMachine
-menu = TestMachine
-title = TestMachine targets
-# Aggiungi host da UI
-EOF
-  chown ${APP_USER}:${APP_GROUP} /etc/smokeping/config.d/Targets
-  chmod 0660 /etc/smokeping/config.d/Targets
-fi
-
-# --- Workdir app + PCAP + SPEEDTEST + VOIP + NETMAP ---
-step "Workdir app + PCAP + SPEEDTEST + VOIP + NETMAP"
+# =====================================================================
+# WORKDIR & SUDOERS GENERALI APP
+# =====================================================================
+step "Workdir app /var/lib/netprobe (+pcap/speedtest/voip/netmap)"
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe /var/lib/netprobe/tmp
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/pcap
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/speedtest
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/voip /var/lib/netprobe/voip/captures
+[[ -f /var/lib/netprobe/voip/captures.json ]] || { echo '{"captures":[]}' >/var/lib/netprobe/voip/captures.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/captures.json; chmod 0660 /var/lib/netprobe/voip/captures.json; }
+[[ -f /var/lib/netprobe/voip/index.json    ]] || { echo '{"calls":{}, "rtp_streams":[], "built_ts":0}' >/var/lib/netprobe/voip/index.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/index.json; chmod 0660 /var/lib/netprobe/voip/index.json; }
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/netmap /var/lib/netprobe/netmap/scans
+[[ -f /var/lib/netprobe/netmap/index.json  ]] || { echo '{"scans":[]}' >/var/lib/netprobe/netmap/index.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/netmap/index.json; chmod 0660 /var/lib/netprobe/netmap/index.json; }
 
-# VOIP
-install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/voip
-install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/voip/captures
-if [[ ! -f /var/lib/netprobe/voip/captures.json ]]; then
-  echo '{"captures":[]}' >/var/lib/netprobe/voip/captures.json
-  chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/captures.json
-  chmod 0660 /var/lib/netprobe/voip/captures.json
-fi
-if [[ ! -f /var/lib/netprobe/voip/index.json ]]; then
-  echo '{"calls":{}, "rtp_streams":[], "built_ts":0}' >/var/lib/netprobe/voip/index.json
-  chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/index.json
-  chmod 0660 /var/lib/netprobe/voip/index.json
-fi
-install -d -m 0770 -o root -g "${APP_GROUP}" /etc/netprobe
-if [[ ! -f /etc/netprobe/voip.json ]]; then
-  cat >/etc/netprobe/voip.json <<'JSON'
-{
-  "sip_ports": [5060, 5061],
-  "rtp_range": [10000, 20000],
-  "duration_max": 3600,
-  "quota_gb": 5,
-  "policy": "rotate",
-  "allow_bpf": true,
-  "privacy_mask_user": false,
-  "ui_poll_ms": 1000,
-  "admin_required_actions": ["start","stop","delete"],
-  "default_codec": "PCMU"
-}
-JSON
-  chown root:${APP_GROUP} /etc/netprobe/voip.json
-  chmod 0660 /etc/netprobe/voip.json
-fi
-
-# NETMAP
-install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/netmap
-install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/netmap/scans
-if [[ ! -f /var/lib/netprobe/netmap/index.json ]]; then
-  echo '{"scans":[]}' >/var/lib/netprobe/netmap/index.json
-  chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/netmap/index.json
-  chmod 0660 /var/lib/netprobe/netmap/index.json
-fi
-
-# --- SUDOERS: consentire controllo collector/exporter dalla UI ---
-step "Sudoers per netprobe (API/Apache/Time/NM + collector/exporter)"
+step "Sudoers operazioni UI (Apache/Timesyncd/NM + copy)"
 cat >/etc/sudoers.d/netprobe-ops <<'EOF'
 Defaults:netprobe !requiretty
 Cmnd_Alias NP_COPY = \
@@ -243,37 +257,106 @@ Cmnd_Alias NP_SVC = \
   /bin/systemctl restart netprobe-flow-exporter@*,/usr/bin/systemctl restart netprobe-flow-exporter@*
 Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
 Cmnd_Alias NP_NM   = /usr/bin/nmcli *
-netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM
+# Lettura sicura della password DB Cacti dalla UI (settings -> cacti)
+Cmnd_Alias NP_CACTI = /usr/bin/cat /etc/cacti/debian.php, /bin/cat /etc/cacti/debian.php
+netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI
 EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
-visudo -c
+visudo -c || true
 
-# --- SUDOERS: hostname (UI) ---
-step "Sudoers hostname (UI)"
-cat >/etc/sudoers.d/netprobe-hostname <<'EOF'
-Defaults:netprobe !requiretty
-netprobe ALL=(root) NOPASSWD: /usr/bin/hostnamectl set-hostname *, /usr/bin/hostnamectl status
-netprobe ALL=(root) NOPASSWD: /usr/bin/install -m 644 /var/lib/netprobe/tmp/hostname.* /etc/hostname
-netprobe ALL=(root) NOPASSWD: /usr/bin/install -m 644 /var/lib/netprobe/tmp/hosts.* /etc/hosts
-EOF
-chmod 440 /etc/sudoers.d/netprobe-hostname
-visudo -c
+# Packet capture / net mapper caps
+step "Capability: dumpcap/arp-scan/nmap non-root"
+setcap cap_net_raw,cap_net_admin+eip /usr/bin/dumpcap || true
+getcap /usr/bin/dumpcap || true
+command -v setcap >/dev/null 2>&1 || apt-get install -y libcap2-bin
+setcap cap_net_raw,cap_net_admin+eip /usr/sbin/arp-scan || true
+setcap cap_net_raw,cap_net_admin+eip /usr/bin/nmap || true
 
-# --- Speedtest (Ookla CLI) + fallback Python ---
-step "Installazione Ookla Speedtest CLI (repo packagecloud)"
+# Gruppi utili
+usermod -aG "${APP_GROUP}" smokeping || true
+usermod -aG "${APP_GROUP}" www-data  || true
+usermod -aG www-data "${APP_USER}"    || true   # per cacti/debian.php (640 root:www-data)
+
+# =====================================================================
+# CACTI + SPINE + MARIADB (installazione e autoconfig)
+# =====================================================================
+step "Installazione MariaDB + Cacti + Spine (non-interattivo)"
+# Evita dbconfig-common
+echo "cacti cacti/dbconfig-install boolean false" | debconf-set-selections
+apt-get install -y --no-install-recommends mariadb-server cacti cacti-spine
+
+systemctl enable --now mariadb
+
+# Genera credenziali DB cacti (se non esistono già)
+CACTI_DB=cacti
+CACTI_USER=cacti
+if [[ -f /etc/cacti/debian.php ]]; then
+  step "Trovato /etc/cacti/debian.php: non rigenero credenziali"
+else
+  step "Creo DB e utente Cacti"
+  CACTI_PW="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+  # crea DB/utente
+  mysql --protocol=socket -e "CREATE DATABASE IF NOT EXISTS \`${CACTI_DB}\` CHARACTER SET utf8mb4;"
+  mysql --protocol=socket -e "CREATE USER IF NOT EXISTS '${CACTI_USER}'@'localhost' IDENTIFIED BY '${CACTI_PW}';"
+  mysql --protocol=socket -e "GRANT ALL PRIVILEGES ON \`${CACTI_DB}\`.* TO '${CACTI_USER}'@'localhost'; FLUSH PRIVILEGES;"
+
+  # importa schema (path varia a seconda della distro)
+  if [[ -f /usr/share/cacti/site/cacti.sql ]]; then
+    mysql --protocol=socket "${CACTI_DB}" < /usr/share/cacti/site/cacti.sql
+  elif [[ -f /usr/share/doc/cacti/cacti.sql.gz ]]; then
+    zcat /usr/share/doc/cacti/cacti.sql.gz | mysql --protocol=socket "${CACTI_DB}"
+  fi
+
+  # /etc/cacti/debian.php
+  install -d -m 0755 /etc/cacti
+  cat >/etc/cacti/debian.php <<PHP
+<?php
+\$database_type     = 'mysql';
+\$database_default  = '${CACTI_DB}';
+\$database_hostname = 'localhost';
+\$database_username = '${CACTI_USER}';
+\$database_password = '${CACTI_PW}';
+\$database_port     = '3306';
+\$database_ssl      = false;
+?>
+PHP
+  chown root:www-data /etc/cacti/debian.php
+  chmod 0640 /etc/cacti/debian.php
+
+  # Spine config
+  if [[ -f /etc/cacti/spine.conf ]]; then
+    sed -i \
+      -e "s~^\(DB_Host[ \t]*\).*~\1localhost~" \
+      -e "s~^\(DB_Database[ \t]*\).*~\1${CACTI_DB}~" \
+      -e "s~^\(DB_User[ \t]*\).*~\1${CACTI_USER}~" \
+      -e "s~^\(DB_Pass[ \t]*\).*~\1${CACTI_PW}~" \
+      -e "s~^\(DB_Port[ \t]*\).*~\13306~" \
+      /etc/cacti/spine.conf || true
+    chown root:www-data /etc/cacti/spine.conf || true
+    chmod 0640 /etc/cacti/spine.conf || true
+  fi
+fi
+
+# Permessi RRD dir (in genere già a posto con pacchetto)
+install -d -m 0775 -o www-data -g www-data /var/lib/cacti/rra || true
+
+# Abilita alias Apache per Cacti
+a2enconf cacti >/dev/null || true
+
+# =====================================================================
+# SPEEDTEST CLI (Ookla) opzionale
+# =====================================================================
+step "Ookla speedtest (opzionale)"
 if ! command -v speedtest >/dev/null 2>&1; then
   curl -fsSL https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | bash || true
   apt-get update || true
   apt-get install -y speedtest || true
 fi
-if command -v speedtest >/dev/null 2>&1; then
-  echo "Ookla speedtest: $(speedtest --version 2>&1 | head -n1 || true)"
-else
-  echo "Ookla speedtest non installato: userò il fallback Python (speedtest-cli)."
-fi
 
-# --- Seed utenti ---
-step "Seed /etc/netprobe/users.json (admin/admin)"
+# =====================================================================
+# SEED UTENTI APP
+# =====================================================================
+step "Seed /etc/netprobe/users.json (admin/admin se assente)"
 install -d -m 0770 -o root -g "${APP_GROUP}" /etc/netprobe
 if [[ ! -s /etc/netprobe/users.json ]]; then
 python3 - <<'PY'
@@ -287,22 +370,20 @@ PY
   chgrp "${APP_GROUP}" /etc/netprobe/users.json
 fi
 
-# --- Riavvio servizi web ---
-step "Riavvio servizi (Apache/SmokePing)"
+# =====================================================================
+# RIAVVII & CHECK FINALI
+# =====================================================================
+step "Riavvio servizi (smokeping + apache)"
 systemctl restart smokeping || true
 systemctl reload apache2 || systemctl restart apache2
 
-# --- Check finali ---
 step "Check finali"
 systemctl is-active --quiet netprobe-api.socket && echo "API socket OK"
 systemctl is-active --quiet smokeping && echo "SmokePing OK"
 apachectl -t || true
-echo -n "HTTP / (via :${WEB_PORT}): "; curl -sI "http://127.0.0.1:${WEB_PORT}/" | head -n1 || true
-echo -n "HTTP /smokeping/ (via Apache): "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping/" | head -n1 || true
-if command -v speedtest >/dev/null 2>&1; then
-  echo "Speedtest CLI presente."
-else
-  echo "Speedtest CLI assente ; fallback Python disponibile (speedtest-cli in venv)."
-fi
+echo -n "HTTP /            : "; curl -sI "http://127.0.0.1:${WEB_PORT}/" | head -n1 || true
+echo -n "HTTP /smokeping/  : "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping/" | head -n1 || true
+echo -n "HTTP /cacti/      : "; curl -sI "http://127.0.0.1:${WEB_PORT}/cacti/" | head -n1 || true
+command -v speedtest >/dev/null 2>&1 && echo "Speedtest CLI presente." || echo "Speedtest CLI assente; fallback Python disponibile."
 
 echo -e "\nFATTO. Log: ${LOG}"

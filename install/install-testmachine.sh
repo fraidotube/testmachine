@@ -41,7 +41,7 @@ apt-get install -y --no-install-recommends \
   smokeping fping \
   network-manager \
   tshark wireshark-common tcpdump libcap2-bin \
-  psmisc nfdump softflowd rrdtool snmp \
+  psmisc nfdump softflowd rrdtool snmp snmpd \
   nmap arp-scan bind9-dnsutils avahi-utils ieee-data
 
 # opzionale: MIBs
@@ -87,12 +87,11 @@ fi
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
 
 # =====================================================================
-# SYSTEMD (ex apply.sh, incorporato)
+# SYSTEMD (apply incorporato)
 # =====================================================================
 deploy_systemd() {
   local SCRIPT_DIR="${APP_DIR}/deploy/systemd"
   local SYSTEMD_DIR="/etc/systemd/system"
-
   local UNIT_API_SVC="netprobe-api.service"
   local UNIT_API_SOCK="netprobe-api.socket"
   local UNIT_COLLECTOR="netprobe-flow-collector.service"
@@ -104,7 +103,6 @@ deploy_systemd() {
   install -D -m 0644 "${SCRIPT_DIR}/${UNIT_COLLECTOR}"     "${SYSTEMD_DIR}/${UNIT_COLLECTOR}"
   install -D -m 0644 "${SCRIPT_DIR}/${UNIT_EXPORTER_TMPL}" "${SYSTEMD_DIR}/${UNIT_EXPORTER_TMPL}"
 
-  # drop-in helper
   copy_dropins() {
     local name="$1"
     local src="${SCRIPT_DIR}/${name}.d"
@@ -119,7 +117,6 @@ deploy_systemd() {
   copy_dropins "netprobe-flow-collector.service"
   copy_dropins "netprobe-flow-exporter@.service"
 
-  # collector drop-ins minimi
   local d="${SYSTEMD_DIR}/netprobe-flow-collector.service.d"
   mkdir -p "$d"
   [[ -s "${d}/10-free-port.conf" ]] || cat >"${d}/10-free-port.conf" <<'EOF'
@@ -190,10 +187,11 @@ deploy_systemd
 # =====================================================================
 step "Apache: moduli & porta ${WEB_PORT}"
 a2enmod proxy proxy_http proxy_wstunnel headers rewrite cgid >/dev/null || true
+a2enmod proxy_fcgi setenvif >/dev/null || true
 sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
 grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 
-step "Site testmachine.conf (escludo /smokeping/ e /cacti/)"
+step "Site testmachine.conf (escludo /smokeping/ /cgi-bin/ /cacti/ + WS)"
 cat >/etc/apache2/sites-available/testmachine.conf <<EOF
 <VirtualHost *:${WEB_PORT}>
   ServerName testmachine
@@ -203,22 +201,21 @@ cat >/etc/apache2/sites-available/testmachine.conf <<EOF
 
   ProxyPreserveHost On
   RequestHeader set X-Forwarded-Proto "http"
-  ProxyPass        /api/ws ws://127.0.0.1:${API_PORT}/api/ws
-  ProxyPassReverse /api/ws ws://127.0.0.1:${API_PORT}/api/ws
-  ProxyPass        / http://127.0.0.1:${API_PORT}/
-  ProxyPassReverse / http://127.0.0.1:${API_PORT}/
+
+  # WebSocket
+  ProxyPass        /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
+  ProxyPassReverse /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
+  ProxyPass        /shell/ws ws://127.0.0.1:${API_PORT}/shell/ws
+  ProxyPassReverse /shell/ws ws://127.0.0.1:${API_PORT}/shell/ws
 
   # Non proxy verso l'app:
   ProxyPass /smokeping/ !
   ProxyPass /cgi-bin/   !
   ProxyPass /cacti/     !
 
-  <Location /smokeping/>
-    Require all granted
-  </Location>
-  <Location /cacti/>
-    Require all granted
-  </Location>
+  # App FastAPI
+  ProxyPass        / http://127.0.0.1:${API_PORT}/
+  ProxyPassReverse / http://127.0.0.1:${API_PORT}/
 </VirtualHost>
 EOF
 a2ensite testmachine.conf >/dev/null || true
@@ -237,7 +234,7 @@ install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/voip /va
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/netmap /var/lib/netprobe/netmap/scans
 [[ -f /var/lib/netprobe/netmap/index.json  ]] || { echo '{"scans":[]}' >/var/lib/netprobe/netmap/index.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/netmap/index.json; chmod 0660 /var/lib/netprobe/netmap/index.json; }
 
-step "Sudoers operazioni UI (Apache/Timesyncd/NM + copy)"
+step "Sudoers operazioni UI"
 cat >/etc/sudoers.d/netprobe-ops <<'EOF'
 Defaults:netprobe !requiretty
 Cmnd_Alias NP_COPY = \
@@ -257,7 +254,7 @@ Cmnd_Alias NP_SVC = \
   /bin/systemctl restart netprobe-flow-exporter@*,/usr/bin/systemctl restart netprobe-flow-exporter@*
 Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
 Cmnd_Alias NP_NM   = /usr/bin/nmcli *
-# Lettura sicura della password DB Cacti dalla UI (settings -> cacti)
+# Lettura sicura password DB Cacti dalla UI
 Cmnd_Alias NP_CACTI = /usr/bin/cat /etc/cacti/debian.php, /bin/cat /etc/cacti/debian.php
 netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI
 EOF
@@ -278,70 +275,70 @@ usermod -aG "${APP_GROUP}" www-data  || true
 usermod -aG www-data "${APP_USER}"    || true   # per cacti/debian.php (640 root:www-data)
 
 # =====================================================================
-# CACTI + SPINE + MARIADB (installazione e autoconfig)
+# PHP + CACTI + SPINE (dbconfig-common = TRUE)
 # =====================================================================
-step "Installazione MariaDB + Cacti + Spine (non-interattivo)"
-# Evita dbconfig-common
-echo "cacti cacti/dbconfig-install boolean false" | debconf-set-selections
-apt-get install -y --no-install-recommends mariadb-server cacti cacti-spine
+step "PHP (FPM) + moduli Required per Cacti"
+apt-get install -y \
+  php php-fpm php-mysql php-xml php-gd php-mbstring php-snmp php-gmp php-intl php-ldap php-curl
 
+# PHP tuning base per Cacti
+PHPVER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+tee /etc/php/${PHPVER}/apache2/conf.d/90-cacti.ini >/dev/null <<'EOF'
+memory_limit = 512M
+max_execution_time = 120
+post_max_size = 32M
+upload_max_filesize = 32M
+date.timezone = Europe/Rome
+EOF
+tee /etc/php/${PHPVER}/cli/conf.d/90-cacti.ini >/dev/null <<'EOF'
+memory_limit = 512M
+max_execution_time = 120
+date.timezone = Europe/Rome
+EOF
+
+a2enmod proxy_fcgi setenvif >/dev/null || true
+a2enconf cacti >/dev/null || true
+
+step "Installazione MariaDB + Cacti + Spine (dbconfig-common abilitato)"
+echo "cacti cacti/dbconfig-install boolean true" | debconf-set-selections
+apt-get install -y mariadb-server cacti cacti-spine
 systemctl enable --now mariadb
 
-# Genera credenziali DB cacti (se non esistono già)
-CACTI_DB=cacti
-CACTI_USER=cacti
-if [[ -f /etc/cacti/debian.php ]]; then
-  step "Trovato /etc/cacti/debian.php: non rigenero credenziali"
-else
-  step "Creo DB e utente Cacti"
-  CACTI_PW="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
-  # crea DB/utente
-  mysql --protocol=socket -e "CREATE DATABASE IF NOT EXISTS \`${CACTI_DB}\` CHARACTER SET utf8mb4;"
-  mysql --protocol=socket -e "CREATE USER IF NOT EXISTS '${CACTI_USER}'@'localhost' IDENTIFIED BY '${CACTI_PW}';"
-  mysql --protocol=socket -e "GRANT ALL PRIVILEGES ON \`${CACTI_DB}\`.* TO '${CACTI_USER}'@'localhost'; FLUSH PRIVILEGES;"
+# Cartelle base utili
+install -d -m 0775 -o www-data -g www-data /usr/share/cacti/site/log || true
+install -d -m 0775 -o www-data -g www-data /var/lib/cacti/rra       || true
+install -d -m 0775 -o www-data -g www-data /var/lib/cacti/csrf       || true
 
-  # importa schema (path varia a seconda della distro)
-  if [[ -f /usr/share/cacti/site/cacti.sql ]]; then
-    mysql --protocol=socket "${CACTI_DB}" < /usr/share/cacti/site/cacti.sql
-  elif [[ -f /usr/share/doc/cacti/cacti.sql.gz ]]; then
-    zcat /usr/share/doc/cacti/cacti.sql.gz | mysql --protocol=socket "${CACTI_DB}"
-  fi
-
-  # /etc/cacti/debian.php
-  install -d -m 0755 /etc/cacti
-  cat >/etc/cacti/debian.php <<PHP
-<?php
-\$database_type     = 'mysql';
-\$database_default  = '${CACTI_DB}';
-\$database_hostname = 'localhost';
-\$database_username = '${CACTI_USER}';
-\$database_password = '${CACTI_PW}';
-\$database_port     = '3306';
-\$database_ssl      = false;
-?>
-PHP
-  chown root:www-data /etc/cacti/debian.php
-  chmod 0640 /etc/cacti/debian.php
-
-  # Spine config
-  if [[ -f /etc/cacti/spine.conf ]]; then
+# Spine: allinea credenziali con /etc/cacti/debian.php
+step "Spine: allineo /etc/cacti/spine.conf a /etc/cacti/debian.php"
+if [[ -f /etc/cacti/spine.conf ]] && [[ -f /etc/cacti/debian.php ]]; then
+  php -r 'include "/etc/cacti/debian.php"; printf("%s|%s|%s|%s|%s\n",$database_hostname,$database_username,$database_password,$database_default,$database_port);' >/tmp/.cactidb || true
+  if [[ -s /tmp/.cactidb ]]; then
+    IFS="|" read -r DBH DBU DBP DBD DBPORT < /tmp/.cactidb
     sed -i \
-      -e "s~^\(DB_Host[ \t]*\).*~\1localhost~" \
-      -e "s~^\(DB_Database[ \t]*\).*~\1${CACTI_DB}~" \
-      -e "s~^\(DB_User[ \t]*\).*~\1${CACTI_USER}~" \
-      -e "s~^\(DB_Pass[ \t]*\).*~\1${CACTI_PW}~" \
-      -e "s~^\(DB_Port[ \t]*\).*~\13306~" \
+      -e "s~^\(DB_Host[ \t]*\).*~\1${DBH:-localhost}~" \
+      -e "s~^\(DB_Database[ \t]*\).*~\1${DBD:-cacti}~" \
+      -e "s~^\(DB_User[ \t]*\).*~\1${DBU:-cacti}~" \
+      -e "s~^\(DB_Pass[ \t]*\).*~\1${DBP:-}~" \
+      -e "s~^\(DB_Port[ \t]*\).*~\1${DBPORT:-3306}~" \
       /etc/cacti/spine.conf || true
     chown root:www-data /etc/cacti/spine.conf || true
     chmod 0640 /etc/cacti/spine.conf || true
   fi
 fi
 
-# Permessi RRD dir (in genere già a posto con pacchetto)
-install -d -m 0775 -o www-data -g www-data /var/lib/cacti/rra || true
-
-# Abilita alias Apache per Cacti
-a2enconf cacti >/dev/null || true
+# Fallback schema: se DB cacti vuoto, importa dallo schema del pacchetto
+step "Verifica schema Cacti e fallback import se necessario"
+CNT=$(mysql -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='cacti';" || echo 0)
+if [[ "${CNT:-0}" -eq 0 ]]; then
+  SCHEMA="$(dpkg -L cacti | grep -E '/cacti\.sql(\.gz)?$' | head -n1 || true)"
+  if [[ -n "$SCHEMA" ]]; then
+    case "$SCHEMA" in
+      *.gz) zcat "$SCHEMA" | mysql cacti ;;
+      *)     mysql cacti < "$SCHEMA"     ;;
+    esac
+  fi
+fi
 
 # =====================================================================
 # SPEEDTEST CLI (Ookla) opzionale
@@ -373,7 +370,8 @@ fi
 # =====================================================================
 # RIAVVII & CHECK FINALI
 # =====================================================================
-step "Riavvio servizi (smokeping + apache)"
+step "Riavvio servizi (PHP-FPM/Apache/SmokePing)"
+systemctl reload php${PHPVER}-fpm || true
 systemctl restart smokeping || true
 systemctl reload apache2 || systemctl restart apache2
 
@@ -384,6 +382,16 @@ apachectl -t || true
 echo -n "HTTP /            : "; curl -sI "http://127.0.0.1:${WEB_PORT}/" | head -n1 || true
 echo -n "HTTP /smokeping/  : "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping/" | head -n1 || true
 echo -n "HTTP /cacti/      : "; curl -sI "http://127.0.0.1:${WEB_PORT}/cacti/" | head -n1 || true
+
+# Test rapido DB come www-data (usa /etc/cacti/debian.php)
+if sudo -u www-data -- php -r 'include "/etc/cacti/debian.php";
+$m=new mysqli($database_hostname,$database_username,$database_password,$database_default,(int)$database_port?:3306);
+echo $m->connect_error ? "DB ERR\n" : "DB OK\n";' 2>/dev/null | grep -q "DB OK"; then
+  echo "Cacti DB OK (www-data)"
+else
+  echo "Attenzione: test DB Cacti fallito (vedi sopra)."
+fi
+
 command -v speedtest >/dev/null 2>&1 && echo "Speedtest CLI presente." || echo "Speedtest CLI assente; fallback Python disponibile."
 
 echo -e "\nFATTO. Log: ${LOG}"

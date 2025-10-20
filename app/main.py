@@ -15,6 +15,7 @@ from routes.voip import router as voip_router
 from routes.netmap import router as netmap_router
 from routes.flow import router as flow_router
 from routes.logs import router as logs_router
+from routes.shell import router as shell_router
 
 
 
@@ -47,6 +48,7 @@ PATH_ROLES = {
     "/logs": ["admin", "operator", "viewer"],
     "/cacti-dbpass": ["admin"],                   # <-- NUOVO: lettura password DB Cacti (solo admin)
     "/cacti": ["admin", "operator", "viewer"],
+    "/shell": ["admin"],
 }
 
 # Percorsi sempre liberi
@@ -109,6 +111,7 @@ app.include_router(voip_router)
 app.include_router(netmap_router)
 app.include_router(flow_router)
 app.include_router(logs_router)
+app.include_router(shell_router) 
 
 # ---- NUOVO: endpoint per leggere la password DB di Cacti (solo admin via RBAC) ----
 import re

@@ -83,6 +83,7 @@ python3 -m venv "${APP_DIR}/venv"
 if [[ -f "${APP_DIR}/requirements.txt" ]]; then
   "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
 else
+  # include websockets/wsproto per la console
   "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart speedtest-cli websockets wsproto
 fi
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
@@ -241,7 +242,7 @@ Defaults:netprobe !requiretty
 Cmnd_Alias NP_COPY = \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/ports.conf, \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/sites-available/testmachine.conf, \
-  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/systemd/timesyncd.conf
+  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/systemd/timesyncd.conf, \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/smokeping/config.d/Database, \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/smokeping/config.d/Targets
 Cmnd_Alias NP_SVC = \
@@ -269,7 +270,7 @@ Cmnd_Alias NP_UPDATE = \
 netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI, NP_UPDATE
 EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
-visudo -c || true
+visudo -cf /etc/sudoers.d/netprobe-ops || { echo "Errore in /etc/sudoers.d/netprobe-ops"; exit 1; }
 
 # Packet capture / net mapper caps
 step "Capability: dumpcap/arp-scan/nmap non-root"

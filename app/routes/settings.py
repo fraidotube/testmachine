@@ -284,6 +284,8 @@ Listen {port}
     ProxyPreserveHost On
     ProxyPass        /api/ws ws://127.0.0.1:9000/api/ws
     ProxyPassReverse /api/ws ws://127.0.0.1:9000/api/ws
+    ProxyPass        /shell/ws ws://127.0.0.1:9000/shell/ws
+    ProxyPassReverse /shell/ws ws://127.0.0.1:9000/shell/ws
     ProxyPass /smokeping/ !
     ProxyPass /cgi-bin/ !
     ProxyPass /cacti/ !

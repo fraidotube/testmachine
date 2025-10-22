@@ -428,3 +428,4 @@ fi
 command -v speedtest >/dev/null 2>&1 && echo "Speedtest CLI presente." || echo "Speedtest CLI assente; fallback Python disponibile."
 
 echo -e "\nFATTO. Log: ${LOG}"
+echo "Benvenuto nel mondo del domani!"

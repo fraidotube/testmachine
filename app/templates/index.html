@@ -336,10 +336,15 @@
         const svcEl = document.getElementById("svc");
         svcEl.innerHTML = "";
         for(const [name, st] of Object.entries(svc)){
-          const label = name.replace(/^netprobe-api$/,"API")
-                            .replace(/^apache2$/,"Apache")
-                            .replace(/^smokeping$/,"SmokePing")
-                            .replace(/^systemd-timesyncd$/,"Timesyncd");
+          const label = name
+            .replace(/^netprobe-api$/,"API")
+            .replace(/^apache2$/,"Apache")
+            .replace(/^smokeping$/,"SmokePing")
+            .replace(/^systemd-timesyncd$/,"Timesyncd")
+            .replace(/^cron$/,"Cron")                                    /* NEW */
+            .replace(/^mariadb$/,"MariaDB")                               /* NEW */
+            .replace(/^netprobe-flow-collector$/,"Flow Collector")        /* NEW */
+            .replace(/^softflowd$/,"Softflowd");                          /* NEW */
           const wrap = document.createElement("div");
           wrap.innerHTML = pill(label, st);
           svcEl.appendChild(wrap.firstChild);
@@ -361,9 +366,14 @@
           ifEl.appendChild(box);
         }
 
-        document.getElementById("caps").textContent = js.dumpcap_caps || "n/d";
-        const ts = new Date((js.time||Date.now())*1000);
-        document.getElementById("ts").textContent = ts.toLocaleString();
+        // campi “storici” mantenuti per retrocompatibilità
+        const capsEl = document.getElementById("caps");
+        if (capsEl) capsEl.textContent = js.dumpcap_caps || "n/d";
+        const tsEl = document.getElementById("ts");
+        if (tsEl) {
+          const ts = new Date((js.time||Date.now())*1000);
+          tsEl.textContent = ts.toLocaleString();
+        }
       }catch(e){
         // in caso di errore, non rompiamo la UI
       }

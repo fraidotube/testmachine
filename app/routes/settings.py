@@ -12,6 +12,10 @@ router = APIRouter()
 
 REPO_DIR = "/opt/netprobe"
 CACTI_DEBIAN_PHP = "/etc/cacti/debian.php"  # path file Cacti
+INSTALLER_CANDIDATES = (
+    "/opt/netprobe/install-testmachine.sh",
+    "/opt/netprobe/install/install-testmachine.sh",
+)
 
 # ------------------- helpers comuni -------------------
 def head(title:str)->str:
@@ -108,6 +112,12 @@ def _git_short_status():
     if rc == 0: s.append(out.strip())
     return "\n".join(s) if s else "n/d"
 
+def _find_installer() -> str | None:
+    for p in INSTALLER_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    return None
+
 # ------------------- Pagina Impostazioni -------------------
 @router.get("/", response_class=HTMLResponse)
 def settings_home(request: Request):
@@ -179,10 +189,10 @@ def settings_home(request: Request):
         <input name='branch' value='main' />
         <button class='btn' type='submit' {"disabled" if not is_admin else ""}>Aggiorna a origin/&lt;branch&gt;</button>
       </form>
-      <p class='muted'>Esegue: <code>git fetch --all --prune</code>, <code>git reset --hard origin/&lt;branch&gt;</code>, <code>apply.sh</code>, riavvio servizio API.</p>
+      <p class='muted'>Esegue: <code>git fetch --all --prune</code>, <code>git reset --hard origin/&lt;branch&gt;</code>, <b>esegue installer (--update)</b>, riavvio servizio API.</p>
     </div>"""
 
-    # Card Cacti (NOTA: stringa normale, NON f-string, così le { } JS non rompono)
+    # Card Cacti (stringa normale, NON f-string)
     cacti_card = """
     <div class='card' style='grid-column:1 / -1'>
       <h2>Cacti (DB password)</h2>
@@ -402,17 +412,24 @@ def _do_update(branch: str, log_path: str):
         return rc
 
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    # 1) Sincronizza codice
     _run(["/usr/bin/git","-C",REPO_DIR,"fetch","--all","--prune"])
     _run(["/usr/bin/git","-C",REPO_DIR,"reset","--hard", f"origin/{branch}"])
 
-    installer = os.path.join(REPO_DIR, "install-testmachine.sh")
-    if os.path.exists(installer):
-        if os.access(installer, os.X_OK):
-            _run(["sudo","-n","/usr/bin/env","DEBIAN_FRONTEND=noninteractive", installer, "--update"])
+    # 2) Esegui installer completo (come root)
+    inst = _find_installer()
+    if inst:
+        if os.access(inst, os.X_OK):
+            rc_inst = _run(["sudo","-n","/usr/bin/env","DEBIAN_FRONTEND=noninteractive", inst, "--update"])
         else:
-            _run(["sudo","-n","/usr/bin/env","DEBIAN_FRONTEND=noninteractive","/bin/bash", installer, "--update"])
+            rc_inst = _run(["sudo","-n","/bin/bash", inst, "--update"])
+        if rc_inst != 0:
+            logs.append("ATTENZIONE: esecuzione installer fallita (controlla sudoers NP_UPDATE e il log sopra).")
+    else:
+        logs.append("ATTENZIONE: installer NON trovato (cercati: " + ", ".join(INSTALLER_CANDIDATES) + "). Fase pacchetti saltata.")
 
-    _run(["sudo","-n", os.path.join(REPO_DIR,"deploy/systemd/apply.sh")])
+    # 3) Assicura reload e API up
     _run(["sudo","-n","/bin/systemctl","daemon-reload"])
     time.sleep(0.8)
     _run(["sudo","-n","/bin/systemctl","restart","netprobe-api.service"])
@@ -434,7 +451,7 @@ def update_from_git(request: Request, background_tasks: BackgroundTasks, branch:
     html = head("Impostazioni") + f"""
     <div class='grid'><div class='card'>
       <h2>Aggiornamento avviato</h2>
-      <p>Sto sincronizzando <code>origin/{escape(b)}</code>, applicando le unit e riavviando l'API.</p>
+      <p>Sto sincronizzando <code>origin/{escape(b)}</code>, eseguendo l'installer e riavviando l'API.</p>
       <p>Log: <code>{escape(log_path)}</code></p>
       <p class='muted'>Ricarica la pagina tra qualche secondo. Se l'API si riavvia, potresti vedere un errore temporaneo.</p>
       <a class='btn' href='/settings/'>Torna alle Impostazioni</a>

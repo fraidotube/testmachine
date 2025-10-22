@@ -252,12 +252,19 @@ Cmnd_Alias NP_SVC = \
   /bin/systemctl restart netprobe-flow-collector, /usr/bin/systemctl restart netprobe-flow-collector, \
   /bin/systemctl start netprobe-flow-exporter@*,  /usr/bin/systemctl start netprobe-flow-exporter@*, \
   /bin/systemctl stop  netprobe-flow-exporter@*,  /usr/bin/systemctl stop  netprobe-flow-exporter@*, \
-  /bin/systemctl restart netprobe-flow-exporter@*,/usr/bin/systemctl restart netprobe-flow-exporter@*
+  /bin/systemctl restart netprobe-flow-exporter@*, /usr/bin/systemctl restart netprobe-flow-exporter@*, \
+  /bin/systemctl restart netprobe-api.service,     /usr/bin/systemctl restart netprobe-api.service
 Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
 Cmnd_Alias NP_NM   = /usr/bin/nmcli *
 # Lettura sicura password DB Cacti dalla UI
 Cmnd_Alias NP_CACTI = /usr/bin/cat /etc/cacti/debian.php, /bin/cat /etc/cacti/debian.php
-netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI
+# Esecuzione installer da UI (entrambe le posizioni)
+Cmnd_Alias NP_UPDATE = \
+  /usr/bin/env DEBIAN_FRONTEND=noninteractive /opt/netprobe/install-testmachine.sh *, \
+  /bin/bash /opt/netprobe/install-testmachine.sh *, \
+  /usr/bin/env DEBIAN_FRONTEND=noninteractive /opt/netprobe/install/install-testmachine.sh *, \
+  /bin/bash /opt/netprobe/install/install-testmachine.sh *
+netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI, NP_UPDATE
 EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -c || true

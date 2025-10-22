@@ -1,6 +1,8 @@
+# /opt/netprobe/app/routes/sp_admin.py
+
 from fastapi import APIRouter, Form
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse, FileResponse
-import os, re, tempfile, shutil, subprocess, tarfile, time
+import os, re, shutil, subprocess, tarfile, time
 from pathlib import Path
 from html import escape
 
@@ -16,7 +18,8 @@ GROUP_HEADER = "+ TestMachine\nmenu = TestMachine\ntitle = Hosts gestiti da Test
 
 RRD_DIR   = Path("/var/lib/smokeping/TestMachine")
 LOCAL_DIR = Path("/var/lib/smokeping/Local")  # alcuni setup creano LocalMachine.rrd qui
-TMP_DIR   = Path("/opt/netprobe/tmp")
+# TMP coerente con l'installer/sudoers:
+TMP_DIR   = Path("/var/lib/netprobe/tmp")
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Helpers comuni ----------------------------------------------------------
@@ -37,6 +40,8 @@ def svc_state():
 
 # ---- Database helpers (step/pings) ------------------------------------------
 def db_get_vals():
+    if not DB_FILE.exists():
+        return 300, 20, ""
     txt = DB_FILE.read_text(encoding="utf-8")
     m1 = re.search(r"(?m)^\s*step\s*=\s*(\d+)\s*$",  txt);  step  = int(m1.group(1)) if m1 else 300
     m2 = re.search(r"(?m)^\s*pings\s*=\s*(\d+)\s*$", txt);  pings = int(m2.group(1)) if m2 else 20
@@ -44,8 +49,11 @@ def db_get_vals():
 
 def db_write_safely(step:int, pings:int, original_txt:str):
     # sostituisco SOLO le righe step/pings
-    new_txt = re.sub(r"(?m)^\s*step\s*=\s*\d+\s*$",  f"step     = {step}",  original_txt)
-    new_txt = re.sub(r"(?m)^\s*pings\s*=\s*\d+\s*$", f"pings    = {pings}", new_txt)
+    if original_txt:
+        new_txt = re.sub(r"(?m)^\s*step\s*=\s*\d+\s*$",  f"step     = {step}",  original_txt)
+        new_txt = re.sub(r"(?m)^\s*pings\s*=\s*\d+\s*$", f"pings    = {pings}", new_txt)
+    else:
+        new_txt = f"step = {step}\npings = {pings}\n"
 
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     tmp = TMP_DIR / f"Database.{int(time.time())}"
@@ -74,7 +82,10 @@ def rrd_existing():
 
 # ---- Targets helpers --------------------------------------------------------
 def read_targets() -> str:
-    return TARGETS.read_text(encoding="utf-8")
+    try:
+        return TARGETS.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
 
 def ensure_block(txt: str) -> str:
     if BEGIN in txt and END in txt:
@@ -123,7 +134,8 @@ def build_block(hosts):
     body += f"{END}"
     return body
 
-def save_targets(original_txt: str, hosts):
+def save_targets_via_sudo(original_txt: str, hosts):
+    """Scrive TARGETS usando sudo install (NOPASSWD) + mantiene permessi del file esistente."""
     i1, i2 = get_indices(original_txt)
     new_block = build_block(hosts)
     if i1 >= 0 and i2 >= 0:
@@ -134,25 +146,27 @@ def save_targets(original_txt: str, hosts):
         i1, i2 = get_indices(new_txt)
         endpos = i2 + len(END)
         new_txt = new_txt[:i1] + new_block + new_txt[endpos:]
-    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
-        f.write(new_txt)
-        tmp = f.name
+
+    tmp = TMP_DIR / f"Targets.{int(time.time())}"
+    tmp.write_text(new_txt, encoding="utf-8")
     if TARGETS.exists():
         shutil.copymode(TARGETS, tmp)
-    os.replace(tmp, TARGETS)
-    return new_txt
+
+    r = run(["sudo","-n","/usr/bin/install","-m","644", str(tmp), str(TARGETS)])
+    ok = (r.returncode == 0)
+    return ok, (r.stdout + r.stderr), new_txt
 
 # --- UI fragments ------------------------------------------------------------
 NAV = (
     "<!doctype html><html><head><meta charset='utf-8'/>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
-        "<title>{escape(title)}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>"
-        "<div class='container'>"
-        "<div class='nav'>"
-          "<div class='brand'><img src='/static/img/logo.svg' class='logo'/></div>"
-          "<div class='title-center'>TestMachine</div>"
-          "<div class='spacer'><a class='btn secondary' href='/'>Home</a></div>"
-        "</div>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'/>"
+    "<title>{escape(title)}</title><link rel='stylesheet' href='/static/styles.css'/></head><body>"
+    "<div class='container'>"
+    "<div class='nav'>"
+      "<div class='brand'><img src='/static/img/logo.svg' class='logo'/></div>"
+      "<div class='title-center'>TestMachine</div>"
+      "<div class='spacer'><a class='btn secondary' href='/'>Home</a></div>"
+    "</div>"
 )
 
 # --- Home --------------------------------------------------------------------
@@ -269,6 +283,8 @@ def targets_page():
 # --- Raw view ---------------------------------------------------------------
 @router.get("/targets/raw", response_class=PlainTextResponse)
 def targets_raw():
+    if not TARGETS.exists():
+        return PlainTextResponse("(Targets mancante)", status_code=200)
     return TARGETS.read_text(encoding="utf-8")
 
 # --- JSON APIs (targets) ----------------------------------------------------
@@ -285,16 +301,24 @@ def hosts_add(name: str, address: str):
         return {"status":"error","detail":"name e address sono obbligatori"}
     if not _name_re.match(name):
         return {"status":"error","detail":"Nome non valido"}
+
     original = ensure_block(read_targets())
     hosts = current_hosts(original)
     if any(h["name"]==name for h in hosts):
         return {"status":"ok","detail":"Già presente"}
+
     hosts.append({"name":name, "address":address})
-    save_targets(original, hosts)
+    ok, det, _ = save_targets_via_sudo(original, hosts)
+    if not ok:
+        return {"status":"error","detail":"scrittura non permessa (sudoers?)", "msg":det}
+
     rc, so, se = sp_check()
     if rc != 0:
-        with open(TARGETS,"w",encoding="utf-8") as f: f.write(original)
+        rb = TMP_DIR / f"Targets.rollback.{int(time.time())}"
+        rb.write_text(original, encoding="utf-8")
+        run(["sudo","-n","/usr/bin/install","-m","644", str(rb), str(TARGETS)])
         return {"status":"error","detail":"Config non valida","check_out":so,"check_err":se}
+
     sp_reload()
     return {"status":"ok"}
 
@@ -305,11 +329,18 @@ def hosts_delete(name: str):
     new_hosts = [h for h in hosts if h["name"] != name]
     if len(new_hosts)==len(hosts):
         return {"status":"error","detail":"Host non trovato"}
-    save_targets(original, new_hosts)
+
+    ok, det, _ = save_targets_via_sudo(original, new_hosts)
+    if not ok:
+        return {"status":"error","detail":"scrittura non permessa (sudoers?)", "msg":det}
+
     rc, so, se = sp_check()
     if rc != 0:
-        with open(TARGETS,"w",encoding="utf-8") as f: f.write(original)
+        rb = TMP_DIR / f"Targets.rollback.{int(time.time())}"
+        rb.write_text(original, encoding="utf-8")
+        run(["sudo","-n","/usr/bin/install","-m","644", str(rb), str(TARGETS)])
         return {"status":"error","detail":"Config non valida","check_out":so,"check_err":se}
+
     sp_reload()
     return {"status":"ok"}
 
@@ -468,9 +499,6 @@ def tuning_save(step: int = Form(...), pings: int = Form(...)):
 </div></body></html>"""
     return HTMLResponse(html)
 
-
-
-
 # --- Actions ----------------------------------------------------------------
 @router.get("/restart", response_class=JSONResponse)
 def restart():
@@ -488,4 +516,3 @@ def export_rrd():
         for p in RRD_DIR.glob("*.rrd"):
             tar.add(str(p), arcname=p.name)
     return FileResponse(str(out), media_type="application/gzip", filename=out.name)
-

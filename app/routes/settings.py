@@ -189,7 +189,7 @@ def settings_home(request: Request):
         <input name='branch' value='main' />
         <button class='btn' type='submit' {"disabled" if not is_admin else ""}>Aggiorna a origin/&lt;branch&gt;</button>
       </form>
-      <p class='muted'>Esegue: <code>git fetch --all --prune</code>, <code>git reset --hard origin/&lt;branch&gt;</code>, <b>esegue installer (--update)</b>, riavvio servizio API.</p>
+      <p class='muted'>Esegue: <code>git fetch --all --prune</code>, <code>git reset --hard origin/&lt;branch&gt;</code>, <b>esegue installer (--update)</b>, e <b>programma un reboot</b> al termine.</p>
     </div>"""
 
     # Card Cacti (stringa normale, NON f-string)
@@ -395,18 +395,40 @@ def set_hostname(request: Request, hostname: str = Form(...)):
 
     return HTMLResponse(head("Impostazioni") + f"<div class='grid'><div class='card'><h2 class='ok'>Hostname impostato a <code>{escape(hn)}</code></h2><a class='btn' href='/settings/'>Torna</a></div></div></div></body></html>")
 
-def _delayed_reboot():
-    time.sleep(1.0)
-    run(["sudo","-n","/bin/systemctl","reboot"])
+# ---- Reboot robusto tramite systemd-run (resiliente ai restart dell'API)
+def _systemd_run(args: list[str]):
+    for sd in ("/bin/systemd-run", "/usr/bin/systemd-run"):
+        if os.path.exists(sd):
+            return run(["sudo","-n", sd] + args)
+    return (1, "", "systemd-run non trovato")
+
+def _schedule_reboot(delay_s: int, reason: str = ""):
+    rc, out, err = _systemd_run(["--unit", "testmachine-reboot",
+                                 "--on-active", str(max(1, delay_s)),
+                                 "/sbin/reboot"])
+    if rc == 0:
+        return rc, out, err
+    # Fallback a shutdown:
+    msg = f"TestMachine: {reason}".strip() or "TestMachine: reboot"
+    if delay_s <= 60:
+        return run(["sudo","-n","/usr/sbin/shutdown","-r","now", msg])
+    else:
+        minutes = max(1, delay_s // 60)
+        return run(["sudo","-n","/usr/sbin/shutdown","-r", f"+{minutes}", msg])
 
 @router.post("/reboot", response_class=HTMLResponse)
-def reboot_machine(request: Request, background_tasks: BackgroundTasks):
+def reboot_machine(request: Request):
     if not _require_admin(request):
         return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Operazione non permessa</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
-    background_tasks.add_task(_delayed_reboot)
-    return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='ok'>Riavvio in corso…</h2><p>La pagina diventerà irraggiungibile per circa 1–2 minuti.</p></div></div></div></body></html>")
+    actor = verify_session_cookie(request) or "unknown"
+    ip = request.headers.get("x-forwarded-for") or (request.client.host if request.client else None)
+    rc, out, err = _schedule_reboot(5, reason=f"riavvio richiesto da {actor} via UI")
+    log_event("settings/reboot", ok=(rc==0), actor=actor, ip=ip,
+              detail="scheduled", extra={"rc": rc, "stderr": (err or "")[:200]})
+    return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='ok'>Riavvio programmato in pochi secondi…</h2><p>La pagina diventerà irraggiungibile per ~1–2 minuti.</p></div></div></div></body></html>")
 
-def _do_update(branch: str, log_path: str):
+# ---- Update con reboot post-aggiornamento
+def _do_update(branch: str, log_path: str, reboot_after: bool = True):
     logs = []
     def _run(cmd):
         rc, out, err = run(cmd)
@@ -415,11 +437,11 @@ def _do_update(branch: str, log_path: str):
 
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
-    # 1) Sincronizza codice
+    # 1) Sync codice
     _run(["/usr/bin/git","-C",REPO_DIR,"fetch","--all","--prune"])
     _run(["/usr/bin/git","-C",REPO_DIR,"reset","--hard", f"origin/{branch}"])
 
-    # 2) Esegui installer completo (come root)
+    # 2) Installer
     inst = _find_installer()
     if inst:
         if os.access(inst, os.X_OK):
@@ -427,14 +449,21 @@ def _do_update(branch: str, log_path: str):
         else:
             rc_inst = _run(["sudo","-n","/bin/bash", inst, "--update"])
         if rc_inst != 0:
-            logs.append("ATTENZIONE: esecuzione installer fallita (controlla sudoers NP_UPDATE e il log sopra).")
+            logs.append("ATTENZIONE: installer fallito (controlla sudoers NP_UPDATE e il log sopra).")
     else:
-        logs.append("ATTENZIONE: installer NON trovato (cercati: " + ", ".join(INSTALLER_CANDIDATES) + "). Fase pacchetti saltata.")
+        logs.append("ATTENZIONE: installer NON trovato. Fase pacchetti saltata.")
 
-    # 3) Assicura reload e API up
-    _run(["sudo","-n","/bin/systemctl","daemon-reload"])
-    time.sleep(0.8)
-    _run(["sudo","-n","/bin/systemctl","restart","netprobe-api.service"])
+    # 3) Reboot o solo restart API
+    if reboot_after:
+        logs.append("Update completato: pianifico reboot tra 10 secondi…")
+        rc, out, err = _systemd_run(["--unit","testmachine-reboot","--on-active","10","/sbin/reboot"])
+        logs.append(f"$ systemd-run --on-active 10 /sbin/reboot\nRC={rc}\n{out}{err}")
+        if rc != 0:
+            r2c, r2o, r2e = run(["sudo","-n","/usr/sbin/shutdown","-r","now","TestMachine: update completato, riavvio"])
+            logs.append(f"$ shutdown -r now\nRC={r2c}\n{r2o}{r2e}")
+    else:
+        _run(["sudo","-n","/bin/systemctl","daemon-reload"])
+        _run(["sudo","-n","/bin/systemctl","restart","netprobe-api.service"])
 
     open(log_path,"w").write("\n\n".join(logs))
 
@@ -448,14 +477,14 @@ def update_from_git(request: Request, background_tasks: BackgroundTasks, branch:
         return HTMLResponse(head("Impostazioni") + "<div class='grid'><div class='card'><h2 class='err'>Branch non valido</h2><a class='btn' href='/settings/'>Indietro</a></div></div></div></body></html>")
 
     log_path = f"/var/lib/netprobe/tmp/update.{int(time.time())}.log"
-    background_tasks.add_task(_do_update, b, log_path)
+    background_tasks.add_task(_do_update, b, log_path, True)  # reboot al termine
 
     html = head("Impostazioni") + f"""
     <div class='grid'><div class='card'>
       <h2>Aggiornamento avviato</h2>
-      <p>Sto sincronizzando <code>origin/{escape(b)}</code>, eseguendo l'installer e riavviando l'API.</p>
+      <p>Sincronizzo <code>origin/{escape(b)}</code>, eseguo l'installer e <b>programmo un riavvio</b> al termine.</p>
       <p>Log: <code>{escape(log_path)}</code></p>
-      <p class='muted'>Ricarica la pagina tra qualche secondo. Se l'API si riavvia, potresti vedere un errore temporaneo.</p>
+      <p class='muted'>Durante l'operazione l'API potrebbe riavviarsi: è normale. Dopo il reboot la UI tornerà disponibile.</p>
       <a class='btn' href='/settings/'>Torna alle Impostazioni</a>
     </div></div></div></body></html>"""
     return HTMLResponse(html)

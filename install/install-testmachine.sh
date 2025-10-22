@@ -267,7 +267,13 @@ Cmnd_Alias NP_UPDATE = \
   /bin/bash /opt/netprobe/install-testmachine.sh *, \
   /usr/bin/env DEBIAN_FRONTEND=noninteractive /opt/netprobe/install/install-testmachine.sh *, \
   /bin/bash /opt/netprobe/install/install-testmachine.sh *
-netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI, NP_UPDATE
+# Power (reboot/shutdown) + systemd-run per reboot pianificato
+Cmnd_Alias NP_POWER = \
+  /sbin/reboot, /usr/sbin/reboot, \
+  /bin/systemctl reboot, /usr/bin/systemctl reboot, \
+  /usr/sbin/shutdown -r now *, /usr/sbin/shutdown -r +* *, \
+  /bin/systemd-run *, /usr/bin/systemd-run *
+netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI, NP_UPDATE, NP_POWER
 EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -cf /etc/sudoers.d/netprobe-ops || { echo "Errore in /etc/sudoers.d/netprobe-ops"; exit 1; }

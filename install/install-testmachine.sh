@@ -42,7 +42,8 @@ apt-get install -y --no-install-recommends \
   network-manager \
   tshark wireshark-common tcpdump libcap2-bin \
   psmisc nfdump softflowd rrdtool snmp snmpd \
-  nmap arp-scan bind9-dnsutils avahi-utils ieee-data
+  nmap arp-scan bind9-dnsutils avahi-utils ieee-data \
+  cron
 
 # opzionale: MIBs
 if candidate="$(apt-cache policy snmp-mibs-downloader 2>/dev/null | awk '/Candidate:/ {print $2}')"; then
@@ -304,10 +305,11 @@ echo "cacti cacti/dbconfig-install boolean true" | debconf-set-selections
 apt-get install -y mariadb-server cacti cacti-spine
 systemctl enable --now mariadb
 
-# Cartelle base utili
+# Cartelle base utili (incluso log per cron)
 install -d -m 0775 -o www-data -g www-data /usr/share/cacti/site/log || true
 install -d -m 0775 -o www-data -g www-data /var/lib/cacti/rra       || true
 install -d -m 0775 -o www-data -g www-data /var/lib/cacti/csrf       || true
+install -d -m 0775 -o www-data -g www-data /var/log/cacti            || true
 
 # Spine: allinea credenziali con /etc/cacti/debian.php
 step "Spine: allineo /etc/cacti/spine.conf a /etc/cacti/debian.php"
@@ -339,6 +341,20 @@ if [[ "${CNT:-0}" -eq 0 ]]; then
     esac
   fi
 fi
+
+# =====================================================================
+# CRON per CACTI
+# =====================================================================
+step "Abilito e avvio cron; verifico job Cacti"
+systemctl enable --now cron
+if [[ -f /etc/cron.d/cacti ]] && grep -q 'poller\.php' /etc/cron.d/cacti; then
+  echo "Job cron Cacti presente in /etc/cron.d/cacti"
+else
+  echo "ATTENZIONE: /etc/cron.d/cacti mancante o senza poller.php (il pacchetto dovrebbe fornirlo)."
+fi
+
+# (opzionale) prima esecuzione del poller
+sudo -u www-data -- php /usr/share/cacti/site/poller.php -f || true
 
 # =====================================================================
 # SPEEDTEST CLI (Ookla) opzionale
@@ -378,6 +394,7 @@ systemctl reload apache2 || systemctl restart apache2
 step "Check finali"
 systemctl is-active --quiet netprobe-api.socket && echo "API socket OK"
 systemctl is-active --quiet smokeping && echo "SmokePing OK"
+systemctl is-active --quiet cron && echo "cron OK (attivo)"
 apachectl -t || true
 echo -n "HTTP /            : "; curl -sI "http://127.0.0.1:${WEB_PORT}/" | head -n1 || true
 echo -n "HTTP /smokeping/  : "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping/" | head -n1 || true

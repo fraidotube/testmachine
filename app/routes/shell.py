@@ -1,10 +1,14 @@
 # app/routes/shell.py
 # -*- coding: utf-8 -*-
 """
-WebShell: /shell (HTML) + /shell/ws (WebSocket).
-Opens a local PTY and execs 'su -l' (login shell). The browser must type the
-root password at the prompt. Page access should be protected by require_admin
-if available in your project; otherwise it is a no-op.
+WebShell
+========
+- GET  /shell     -> pagina HTML (xterm.js) che apre un WebSocket
+- WS   /shell/ws  -> ponte PTY <-> WebSocket
+
+Apre un PTY e lancia una login shell chiedendo la password (default: 'su -l').
+Puoi cambiare il comando di login con l'env SHELL_CMD (es. "sudo -s" oppure "/bin/bash -l").
+Se esiste routes.auth.require_admin lo usa come guard di accesso pagina.
 """
 
 from __future__ import annotations
@@ -17,12 +21,15 @@ import signal
 import fcntl
 import termios
 import struct
+from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
-# Optional auth: try to import require_admin; fallback to no-op.
+# -------------------------
+# Auth opzionale
+# -------------------------
 def _noauth_stub():
     return None
 
@@ -31,83 +38,112 @@ try:
 except Exception:
     require_admin = _noauth_stub  # type: ignore
 
-templates = Jinja2Templates(directory="app/templates")
+# -------------------------
+# Templates (percorso assoluto)
+# -------------------------
+BASE_DIR = Path(__file__).resolve().parents[1]   # -> /opt/netprobe/app
+TEMPLATES_DIR = BASE_DIR / "templates"
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
 router = APIRouter(tags=["Shell"])
 
 
 @router.get("/shell", response_class=HTMLResponse)
 async def shell_page(request: Request, _user=Depends(require_admin)):
-    """Render the terminal page (protected by require_admin if present)."""
+    """Render della pagina terminale (fallback se il template manca)."""
+    tpl = TEMPLATES_DIR / "shell.html"
+    if not tpl.exists():
+        return HTMLResponse(
+            "<h1>Shell</h1><p>Template <code>app/templates/shell.html</code> non trovato.</p>",
+            status_code=200,
+        )
     return templates.TemplateResponse("shell.html", {"request": request})
 
 
 def set_winsize(fd: int, cols: int, rows: int) -> None:
-    """Set PTY window size."""
-    if cols <= 0 or rows <= 0:
-        return
-    winsz = struct.pack("HHHH", rows, cols, 0, 0)
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, winsz)
+    """Imposta dimensioni del PTY."""
+    if cols > 0 and rows > 0:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
-async def _forward_ws_to_pty(ws: WebSocket, master_fd: int):
+async def _forward_ws_to_pty(ws: WebSocket, master_fd: int) -> None:
     """
-    Receive messages from WebSocket and write to PTY.
-    Supports {"resize": [cols, rows]} JSON messages for terminal resize.
+    WS -> PTY
+    - bytes: scrive direttamente
+    - text: se JSON {"resize":[c,r]} fa resize, altrimenti invia come input
     """
     while True:
         msg = await ws.receive()
-        if msg.get("type") == "websocket.disconnect":
+        t = msg.get("type")
+
+        if t == "websocket.disconnect":
             break
 
-        if msg.get("bytes") is not None:
-            os.write(master_fd, msg["bytes"])
+        data_b = msg.get("bytes")
+        if data_b is not None:
+            try:
+                os.write(master_fd, data_b)
+            except OSError:
+                break
             continue
 
-        if msg.get("text") is not None:
-            text = msg["text"]
-            # try resize
+        data_t = msg.get("text")
+        if data_t is not None:
+            # tentativo resize JSON
             try:
-                data = json.loads(text)
-                if isinstance(data, dict) and "resize" in data:
-                    cols, rows = data["resize"]
+                obj = json.loads(data_t)
+                if isinstance(obj, dict) and "resize" in obj:
+                    cols, rows = obj["resize"]
                     set_winsize(master_fd, int(cols), int(rows))
                     continue
             except Exception:
                 pass
-            os.write(master_fd, text.encode(errors="ignore"))
+            try:
+                os.write(master_fd, data_t.encode("utf-8", errors="ignore"))
+            except OSError:
+                break
 
 
-async def _forward_pty_to_ws(ws: WebSocket, master_fd: int):
-    """Read from PTY and send bytes to WebSocket."""
+async def _forward_pty_to_ws(ws: WebSocket, master_fd: int) -> None:
+    """PTY -> WS (sempre come bytes)."""
     loop = asyncio.get_running_loop()
     while True:
-        data = await loop.run_in_executor(None, os.read, master_fd, 4096)
-        if not data:
+        try:
+            chunk = await loop.run_in_executor(None, os.read, master_fd, 4096)
+        except Exception:
             break
-        await ws.send_bytes(data)
+        if not chunk:
+            break
+        try:
+            await ws.send_bytes(chunk)
+        except (WebSocketDisconnect, RuntimeError):
+            break
 
 
 @router.websocket("/shell/ws")
-async def shell_ws(ws: WebSocket):
-    """
-    WebSocket endpoint: create PTY, exec 'su -l' in child, and proxy bytes.
-    Do not construct a Request(scope) here; scope type is 'websocket'.
-    """
+async def shell_ws(ws: WebSocket) -> None:
+    """WebSocket: crea PTY, esegue 'su -l' (o $SHELL_CMD) e fa da proxy."""
     await ws.accept()
 
+    # Comando di login (default: su -l)
+    login_cmd = os.environ.get("SHELL_CMD", "su -l")
+    argv = login_cmd.split()
+
+    # Crea il PTY e fork
     pid, master_fd = pty.fork()
     if pid == 0:
-        # Child: exec login shell
+        # Child: nuova login shell sullo slave del PTY
         try:
             os.environ.setdefault("TERM", "xterm-256color")
             os.environ.setdefault("LANG", "C.UTF-8")
-            os.execvp("su", ["su", "-l"])
+            os.execvp(argv[0], argv)  # es. ['su', '-l']
         except Exception:
+            # fallback: bash login shell
             os.execvp("/bin/bash", ["bash", "-l"])
         finally:
             os._exit(1)
 
-    # Parent: proxy
+    # Parent: inoltra dati
     try:
         set_winsize(master_fd, 120, 32)
     except Exception:
@@ -118,10 +154,7 @@ async def shell_ws(ws: WebSocket):
 
     try:
         await asyncio.wait({to_pty, to_ws}, return_when=asyncio.FIRST_COMPLETED)
-    except WebSocketDisconnect:
-        pass
     finally:
-        # cleanup
         for t in (to_pty, to_ws):
             try:
                 t.cancel()
@@ -131,6 +164,7 @@ async def shell_ws(ws: WebSocket):
             os.close(master_fd)
         except Exception:
             pass
+        # prova a chiudere gentilmente la sessione di login
         try:
             os.kill(pid, signal.SIGHUP)
         except ProcessLookupError:
@@ -140,7 +174,13 @@ async def shell_ws(ws: WebSocket):
                 os.kill(pid, signal.SIGTERM)
             except Exception:
                 pass
+        # aspetta il child per evitare zombie
         try:
             await asyncio.get_running_loop().run_in_executor(None, os.waitpid, pid, 0)
+        except Exception:
+            pass
+        # chiudi il WS lato server se ancora aperto
+        try:
+            await ws.close()
         except Exception:
             pass

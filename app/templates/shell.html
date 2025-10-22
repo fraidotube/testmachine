@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Console</title>
+
+  <!-- Stili globali dell’app (navbar, grid, card, bottoni, ecc) -->
+  <link rel="stylesheet" href="/static/styles.css"/>
+
+  <!-- Xterm.js -->
+  <link rel="stylesheet" href="https://unpkg.com/xterm/css/xterm.css">
+  <script src="https://unpkg.com/xterm/lib/xterm.js"></script>
+  <script src="https://unpkg.com/xterm-addon-fit/lib/xterm-addon-fit.js"></script>
+
+  <!-- Stili locali della pagina shell (minimi, non invadenti) -->
+  <style>
+    .controls{display:flex;gap:10px;align-items:center;margin-bottom:12px}
+    #status{font-size:14px;opacity:.9}
+    #status.ok{color:#2ecc71}
+    #status.err{color:#e74c3c}
+    .term-shell{height:520px;background:#000;border-radius:10px;padding:8px}
+    @media (max-width:700px){.term-shell{height:420px}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Intestazione identica alle altre pagine -->
+    <div class="nav">
+      <div class="brand"><img src="/static/img/logo.svg" class="logo" alt="logo"/></div>
+      <div class="title-center">TestMachine</div>
+      <div class="spacer"><a class="btn secondary" href="/">Home</a></div>
+    </div>
+
+    <!-- Contenuto -->
+    <div class="grid">
+      <div class="card" style="grid-column:1 / -1">
+        <h2>Console</h2>
+
+        <div class="controls">
+          <button id="btnConnect" class="btn">Connect</button>
+          <button id="btnClear" class="btn secondary">Clear</button>
+          <span id="status" class="err">disconnected</span>
+        </div>
+
+        <div id="terminal" class="term-shell"></div>
+        <p class="muted" style="margin-top:8px">
+          You will be connected to a login shell using <code>su -l</code>. Type the root password when prompted.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let term, fitAddon, ws;
+
+    function wsUrl() {
+      const proto = (location.protocol === 'https:') ? 'wss' : 'ws';
+      return `${proto}://${location.host}/shell/ws`;
+    }
+    function setStatus(text, ok=false){
+      const el=document.getElementById('status');
+      el.textContent=text; el.className=ok?'ok':'err';
+    }
+
+    function connect(){
+      if(ws && (ws.readyState===WebSocket.OPEN||ws.readyState===WebSocket.CONNECTING)) return;
+      ws=new WebSocket(wsUrl());
+      setStatus('connecting…', false);
+      ws.binaryType='arraybuffer';
+
+      ws.onopen=()=>{
+        setStatus('connected', true);
+        try{fitAddon.fit()}catch{}
+        sendResize();
+      };
+      ws.onmessage=(ev)=>{
+        if(ev.data instanceof ArrayBuffer){term.write(new Uint8Array(ev.data))}
+        else if(typeof ev.data==='string'){term.write(ev.data)}
+      };
+      ws.onclose=()=>setStatus('disconnected', false);
+      ws.onerror=()=>setStatus('error', false);
+    }
+
+    function sendResize(){
+      if(!ws || ws.readyState!==WebSocket.OPEN) return;
+      const cols=term.cols||120, rows=term.rows||32;
+      try{ ws.send(JSON.stringify({resize:[cols,rows]})) }catch{}
+    }
+
+    function setupTerminal(){
+      term=new Terminal({
+        convertEol:true,
+        cursorBlink:true,
+        fontFamily:'ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace',
+        fontSize:14,
+        theme:{background:'#000000'}
+      });
+      fitAddon=new FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(document.getElementById('terminal'));
+      try{fitAddon.fit()}catch{}
+      term.onData(d=>{
+        if(ws && ws.readyState===WebSocket.OPEN){
+          ws.send(new TextEncoder().encode(d));
+        }
+      });
+
+      let t;
+      window.addEventListener('resize',()=>{
+        clearTimeout(t);
+        t=setTimeout(()=>{ try{fitAddon.fit()}catch{}; sendResize(); },120);
+      });
+    }
+
+    document.getElementById('btnConnect').addEventListener('click', connect);
+    document.getElementById('btnClear').addEventListener('click', ()=>term && term.clear());
+    setupTerminal(); setStatus('disconnected', false);
+  </script>
+</body>
+</html>

@@ -242,6 +242,8 @@ Cmnd_Alias NP_COPY = \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/ports.conf, \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/apache2/sites-available/testmachine.conf, \
   /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/systemd/timesyncd.conf
+  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/smokeping/config.d/Database, \
+  /usr/bin/install -m 644 /var/lib/netprobe/tmp/* /etc/smokeping/config.d/Targets
 Cmnd_Alias NP_SVC = \
   /bin/systemctl reload apache2, /usr/bin/systemctl reload apache2, \
   /bin/systemctl restart apache2, /usr/bin/systemctl restart apache2, \

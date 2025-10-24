@@ -327,7 +327,7 @@ Listen {port}
     open(tmp_ports,"w").write(ports_txt)
     open(tmp_vhost,"w").write(vhost_txt)
 
-    # Applico in background (piccolo helper inline)
+    # Applico in background 
     def _apply():
         _apply_port_change(tmp_ports, tmp_vhost, bak_ports, bak_vhost)
     try:

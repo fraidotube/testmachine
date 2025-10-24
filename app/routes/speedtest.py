@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Form, Body
+# /opt/netprobe/app/routes/speedtest.py
+from fastapi import APIRouter, Form, Body, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from pathlib import Path
 from html import escape
-import subprocess, os, json, time
+import subprocess, os, json, time, signal, shutil
 
 router = APIRouter(prefix="/speedtest", tags=["speedtest"])
 
@@ -10,11 +11,28 @@ SPEED_DIR   = Path("/var/lib/netprobe/speedtest")
 STATE_FILE  = SPEED_DIR / "state.json"     # {"pid":int|null, "started":ts, "result":{...}|null, "tool":"ookla|pycli"}
 LOG_FILE    = SPEED_DIR / "last.log"
 HIST_FILE   = SPEED_DIR / "history.jsonl"  # 1 riga JSON per test (append-only)
+LAST_FILE   = SPEED_DIR / "last.json"      # snapshot ultimo test (compat per alerting)
 
 SPEEDTEST_CFG = Path("/etc/netprobe/speedtest.json")
+
+_DEFAULT_CFG = {
+    "enabled": True,           # scheduler abilitato
+    "interval_min": 120,       # ogni N minuti
+    "retention_max": 10000,    # massimo record da conservare
+    "prefer": "auto",          # auto | ookla | pycli
+    "server_id": "",           # opzionale
+    "tag": ""                  # tag libero
+}
+
 def _cfg_load():
-    try: return json.loads(SPEEDTEST_CFG.read_text("utf-8"))
-    except Exception: return {"interval_min": 120, "retention_days": 90}
+    try:
+        cfg = json.loads(SPEEDTEST_CFG.read_text("utf-8"))
+        for k,v in _DEFAULT_CFG.items():
+            cfg.setdefault(k, v)
+        return cfg
+    except Exception:
+        return dict(_DEFAULT_CFG)
+
 def _cfg_save(c:dict):
     tmp=SPEEDTEST_CFG.with_suffix(".tmp")
     tmp.write_text(json.dumps(c,indent=2),encoding="utf-8"); os.replace(tmp,SPEEDTEST_CFG)
@@ -26,6 +44,8 @@ def _ensure_dir():
         STATE_FILE.write_text(json.dumps({"pid": None, "started": None, "result": None, "tool": None}, indent=2), encoding="utf-8")
     if not HIST_FILE.exists():
         HIST_FILE.write_text("", encoding="utf-8")
+    if not LAST_FILE.exists():
+        LAST_FILE.write_text("{}", encoding="utf-8")
 
 def _load_state():
     _ensure_dir()
@@ -48,21 +68,6 @@ def _alive(pid: int | None) -> bool:
     except Exception:
         return False
 
-def _append_history(entry: dict):
-    """Scrive una riga JSON nello storico in modo atomico (best-effort)."""
-    _ensure_dir()
-    line = json.dumps(entry, separators=(",", ":")) + "\n"
-    tmp = HIST_FILE.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(line)
-    # append atomico (rename non atomico cross-filesystem, ma qui è stesso FS)
-    with open(HIST_FILE, "a", encoding="utf-8") as f:
-        f.write(line)
-    try:
-        tmp.unlink(missing_ok=True)
-    except Exception:
-        pass
-
 def _read_history(limit: int = 100) -> list[dict]:
     _ensure_dir()
     if not HIST_FILE.exists():
@@ -80,7 +85,6 @@ def _read_history(limit: int = 100) -> list[dict]:
                     pass
     except Exception:
         return []
-    # ultimi prima
     rows.reverse()
     return rows[: max(1, min(1000, int(limit)))]
 
@@ -98,33 +102,31 @@ def _page_head(title: str) -> str:
         "</div>"
     )
 
-def _pick_cmd() -> tuple[list[str], str]:
-    """Ritorna (cmd, toolname). Preferisce Ookla CLI se disponibile."""
-    import shutil
-    # 1) Ookla CLI
-    if shutil.which("speedtest"):
-        return (
-            ["/usr/bin/speedtest",
-             "-f", "json", "-p", "no",
-             "--accept-license", "--accept-gdpr"],
-            "ookla"
-        )
-    # 2) Python speedtest-cli (fallback)
+def _pick_cmd(cfg: dict) -> tuple[list[str], str]:
+    prefer = (cfg.get("prefer") or "auto").lower()
+    server_id = str(cfg.get("server_id") or "").strip()
+
+    if prefer in ("auto", "ookla") and shutil.which("speedtest"):
+        cmd = ["/usr/bin/speedtest", "-f", "json", "-p", "no", "--accept-license", "--accept-gdpr"]
+        if server_id:
+            cmd += ["--server-id", server_id]
+        return (cmd, "ookla")
+
     py = shutil.which("python3") or "python3"
     code = (
-        "import json,sys; "
-        "import speedtest as s; "
-        "st=s.Speedtest(); st.get_servers(); st.get_best_server(); "
+        "import json,sys; import speedtest as s; st=s.Speedtest(); "
+        "sid=sys.argv[1] if len(sys.argv)>1 else ''; "
+        "st.get_servers(([int(sid)] if (sid and sid.isdigit()) else None)); "
+        "st.get_best_server(); "
         "d=st.download(); u=st.upload(pre_allocate=False); "
         "p=st.results.ping; sv=st.results.server or {}; "
         "print(json.dumps({'ping':p,'download':d,'upload':u,'server':sv}))"
     )
-    return ([py, "-c", code], "pycli")
-
-import signal
+    cmd = [py, "-c", code, server_id]
+    return (cmd, "pycli")
 
 @router.get("/", response_class=HTMLResponse)
-def page():
+def page(request: Request):
     html = _page_head("Speedtest") + """
 <style>
   :root{ --st-a:#10b981; --st-b:#059669; }
@@ -147,7 +149,10 @@ def page():
   <div class='card card--st'>
     <div class='hero'>
       <h2>Speedtest</h2>
-      <div id="state-pill" class="pill">Pronto</div>
+      <div class='row'>
+        <a class='btn secondary small' href='/speedtest/settings'>Impostazioni scheduler</a>
+        <div id="state-pill" class="pill">Pronto</div>
+      </div>
     </div>
     <p class='muted'>Misura ping, download e upload.</p>
 
@@ -203,13 +208,11 @@ def page():
 
 </div>
 <script>
-let timer=null, phase=0;
+let timer=null, phase=0, histOnce=true; // FIX: non ricaricare la tabella continuamente
 
-/* formattatori */
 function humanBitsps(bps){ if(!bps) return "-"; const u=["bps","Kbps","Mbps","Gbps","Tbps"]; let i=0,v=Number(bps); while(v>=1000 && i<u.length-1){ v/=1000; i++; } return v.toFixed(2)+" "+u[i]; }
 function setPhase(p){ phase=p; for(let i=1;i<=3;i++){ document.getElementById('ph'+i).classList.toggle('on', i<=p); }}
 
-/* stato */
 async function status(){
   const r = await fetch('/speedtest/status');
   if(!r.ok) return;
@@ -241,8 +244,8 @@ async function status(){
     document.getElementById('ips').textContent = iptxt || "-";
 
     const pingMs = (res.ping?.latency ?? res.ping ?? res.ping_ms ?? null);
-    document.getElementById('pg').textContent = pingMs!=null ? pingMs.toFixed(2)+" ms" : "-";
-    document.getElementById('jit').textContent = res.ping?.jitter!=null ? res.ping.jitter.toFixed(2)+" ms" : "-";
+    document.getElementById('pg').textContent = pingMs!=null ? (+pingMs).toFixed(2)+" ms" : "-";
+    document.getElementById('jit').textContent = res.ping?.jitter!=null ? (+res.ping.jitter).toFixed(2)+" ms" : "-";
     document.getElementById('pl').textContent  = (res.packetLoss!=null) ? (res.packetLoss+" %") : "-";
 
     let d = res.download?.bandwidth!=null ? res.download.bandwidth*8 : (res.download ?? null);
@@ -251,22 +254,20 @@ async function status(){
     document.getElementById('ul').textContent = humanBitsps(u);
 
     document.getElementById('res-box').style.display = "";
-    // aggiorna storico appena arriva un risultato
-    histRefresh();
+    if(!histOnce){ histOnce=true; histRefresh(); } // FIX: aggiorna storico una sola volta a fine test
   } else {
     document.getElementById('res-box').style.display = "none";
   }
 }
 
-/* storico */
 function histRow(tr, it){
   const iptxt = [it.internalIp, it.externalIp].filter(Boolean).join(" → ");
   const sv = [it.server_name, it.server_loc].filter(Boolean).join(" · ");
   tr.innerHTML = `
     <td><input type="checkbox" data-ts="${it.ts}"></td>
     <td class="mono">${new Date(it.ts*1000).toLocaleString()}</td>
-    <td class="mono" style="text-align:right">${it.ping_ms!=null ? it.ping_ms.toFixed(2)+' ms' : '-'}</td>
-    <td class="mono" style="text-align:right">${it.jitter_ms!=null ? it.jitter_ms.toFixed(2)+' ms' : '-'}</td>
+    <td class="mono" style="text-align:right">${it.ping_ms!=null ? (+it.ping_ms).toFixed(2)+' ms' : '-'}</td>
+    <td class="mono" style="text-align:right">${it.jitter_ms!=null ? (+it.jitter_ms).toFixed(2)+' ms' : '-'}</td>
     <td class="mono" style="text-align:right">${it.loss_pct!=null ? it.loss_pct+' %' : '-'}</td>
     <td class="mono" style="text-align:right">${humanBitsps(it.down_bps)}</td>
     <td class="mono" style="text-align:right">${humanBitsps(it.up_bps)}</td>
@@ -303,8 +304,14 @@ async function histDeleteSel(){
   histRefresh();
 }
 
-async function startTest(){ await fetch('/speedtest/start',{method:'POST'}); setPhase(1); if(!timer){ timer=setInterval(status, 1000); } status(); }
+async function startTest(){ await fetch('/speedtest/start',{method:'POST'}); setPhase(1); histOnce=false; if(!timer){ timer=setInterval(status, 1000); } status(); } // FIX: histOnce=false all'avvio
 async function cancelTest(){ await fetch('/speedtest/cancel',{method:'POST'}); setPhase(0); status(); }
+
+// Auto-start via ?start=1
+(function(){
+  const p = new URLSearchParams(location.search);
+  if(p.get('start')==='1'){ startTest(); }
+})();
 
 timer=setInterval(status, 1000);
 status(); histRefresh();
@@ -323,10 +330,6 @@ def st_status():
         _save_state(st)
     return {"running": running, "result": st.get("result"), "tool": st.get("tool")}
 
-def _start_subprocess_and_detach(cmd:list[str]):
-    with open(LOG_FILE, "w") as log:
-        return subprocess.Popen(cmd, stdout=log, stderr=log, preexec_fn=os.setsid)
-
 # ----------------- start/cancel -----------------
 @router.post("/start", response_class=JSONResponse)
 def start():
@@ -339,45 +342,47 @@ def start():
     st["started"] = int(time.time())
     _save_state(st)
 
-    cmd, tool = _pick_cmd()
+    cfg = _cfg_load()
+    cmd, tool = _pick_cmd(cfg)
     st["tool"] = tool
     _save_state(st)
 
-    # wrapper che esegue il test, aggiorna state.json e appende allo storico
     wrapper = SPEED_DIR / "run_speedtest.py"
     wrapper_code = f"""
 import json, subprocess, pathlib, sys, os, time
 STATE = pathlib.Path({json.dumps(str(STATE_FILE))})
 LOG   = pathlib.Path({json.dumps(str(LOG_FILE))})
 HIST  = pathlib.Path({json.dumps(str(HIST_FILE))})
+LAST  = pathlib.Path({json.dumps(str(LAST_FILE))})
 CMD   = {json.dumps(cmd)}
+CFG   = pathlib.Path('/etc/netprobe/speedtest.json')  # FIX: per retention
+TAG   = {json.dumps(_cfg_load().get("tag") or "")}
 
-def _w(txt):
+def _cfg_retention():
     try:
-        with open(HIST, "a", encoding="utf-8") as f: f.write(txt)
-    except Exception: pass
+        import json
+        c = json.loads(CFG.read_text('utf-8'))
+        return int(c.get('retention_max', 10000)) or 0
+    except Exception:
+        return 0
 
-# esegui comando e cattura stdout/stderr
 try:
-    p = subprocess.run(CMD, capture_output=True, text=True, timeout=600)
+    p = subprocess.run(CMD, capture_output=True, text=True, timeout=900)
     OUT = (p.stdout or "")
     ERR = (p.stderr or "")
 except Exception as e:
     OUT, ERR = "", str(e)
 
-# salva log completo
 try:
     LOG.write_text(OUT + ("\\n" if OUT else "") + ERR)
 except Exception:
     pass
 
-# parse JSON da stdout; se fallisce, risultato vuoto ma log pieno
 try:
     result = json.loads(OUT.strip() or "{{}}")
 except Exception:
     result = {{}}
 
-# aggiorna state.json
 try:
     st = json.loads(STATE.read_text())
 except Exception:
@@ -386,54 +391,73 @@ st["result"] = result
 st["pid"] = None
 STATE.write_text(json.dumps(st, indent=2))
 
-# appende allo storico (entry "compatta")
+now = int(time.time())
+ping_ms = None
+jitter_ms = None
+if isinstance(result.get("ping"), dict):
+    ping_ms = result.get("ping",{{}}).get("latency")
+    jitter_ms = result.get("ping",{{}}).get("jitter")
+elif isinstance(result.get("ping"), (int,float)):
+    ping_ms = result.get("ping")
+elif "ping_ms" in result:
+    ping_ms = result.get("ping_ms")
+
+down_bps = None
+if isinstance(result.get("download"), dict) and "bandwidth" in result.get("download"):
+    down_bps = (result["download"]["bandwidth"] or 0) * 8
+elif isinstance(result.get("download"), (int,float)):
+    down_bps = result.get("download")
+
+up_bps = None
+if isinstance(result.get("upload"), dict) and "bandwidth" in result.get("upload"):
+    up_bps = (result["upload"]["bandwidth"] or 0) * 8
+elif isinstance(result.get("upload"), (int,float)):
+    up_bps = result.get("upload")
+
+server = result.get("server") or {{}}
+iface  = result.get("interface") or {{}}
+rid    = (result.get("result") or {{}}).get("id")
+
+entry = {{
+    "ts": now,
+    "tool": {json.dumps(st.get("tool"))},
+    "ok": bool(result),
+    "tag": TAG,
+    "ping_ms": ping_ms,
+    "jitter_ms": jitter_ms,
+    "loss_pct": result.get("packetLoss"),
+    "down_bps": down_bps,
+    "up_bps": up_bps,
+    "server_name": server.get("name"),
+    "server_loc": server.get("location"),
+    "server_id": server.get("id"),
+    "isp": result.get("isp"),
+    "internalIp": iface.get("internalIp"),
+    "externalIp": iface.get("externalIp"),
+    "uuid": rid
+}}
+
 try:
-    now = int(time.time())
-    ping_ms = None
-    jitter_ms = None
-    if isinstance(result.get("ping"), dict):
-        ping_ms = result.get("ping",{{}}).get("latency")
-        jitter_ms = result.get("ping",{{}}).get("jitter")
-    elif isinstance(result.get("ping"), (int,float)):
-        ping_ms = result.get("ping")
-    elif "ping_ms" in result:
-        ping_ms = result.get("ping_ms")
-
-    down_bps = None
-    if isinstance(result.get("download"), dict) and "bandwidth" in result.get("download"):
-        down_bps = (result["download"]["bandwidth"] or 0) * 8
-    elif isinstance(result.get("download"), (int,float)):
-        down_bps = result.get("download")
-
-    up_bps = None
-    if isinstance(result.get("upload"), dict) and "bandwidth" in result.get("upload"):
-        up_bps = (result["upload"]["bandwidth"] or 0) * 8
-    elif isinstance(result.get("upload"), (int,float)):
-        up_bps = result.get("upload")
-
-    server = result.get("server") or {{}}
-    iface  = result.get("interface") or {{}}
-    rid    = (result.get("result") or {{}}).get("id")
-
-    entry = {{
-        "ts": now,
-        "tool": st.get("tool"),
-        "ok": bool(result),
-        "ping_ms": ping_ms,
-        "jitter_ms": jitter_ms,
-        "loss_pct": result.get("packetLoss"),
-        "down_bps": down_bps,
-        "up_bps": up_bps,
-        "server_name": server.get("name"),
-        "server_loc": server.get("location"),
-        "server_id": server.get("id"),
-        "isp": result.get("isp"),
-        "internalIp": iface.get("internalIp"),
-        "externalIp": iface.get("externalIp"),
-        "uuid": rid
-    }}
     with open(HIST, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, separators=(",", ":")) + "\\n")
+except Exception:
+    pass
+
+try:
+    with open(LAST, "w", encoding="utf-8") as f:
+        json.dump(entry, f, indent=2)
+except Exception:
+    pass
+
+# FIX: trim retention
+try:
+    N = _cfg_retention()
+    if N > 0:
+        with open(HIST, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        if len(lines) > N:
+            with open(HIST, "w", encoding="utf-8") as f:
+                f.writelines(lines[-N:])
 except Exception:
     pass
 """
@@ -465,7 +489,6 @@ def cancel():
 @router.get("/history", response_class=JSONResponse)
 def history(limit: int = 100):
     items = _read_history(limit=limit)
-    # metto totale reale (righe file)
     try:
         total = sum(1 for _ in open(HIST_FILE, "r", encoding="utf-8"))
     except Exception:
@@ -483,7 +506,6 @@ def history_clear():
 
 @router.post("/history/delete", response_class=JSONResponse)
 def history_delete(ts: dict = Body(default={"ts": []})):
-    """ts = {"ts":[timestamp_int,...]}"""
     _ensure_dir()
     ids = set(int(x) for x in (ts or {}).get("ts", []) if isinstance(x, (int, float, str)))
     if not ids:
@@ -517,15 +539,15 @@ def history_export_jsonl():
 @router.get("/history/export.csv")
 def history_export_csv():
     items = _read_history(limit=1000000)
-    # CSV semplice
-    head = ["timestamp","iso","tool","ok","ping_ms","jitter_ms","loss_pct","down_bps","up_bps","server_name","server_loc","server_id","isp","internalIp","externalIp","uuid"]
+    head = ["timestamp","iso","tool","ok","tag","ping_ms","jitter_ms","loss_pct","down_bps","up_bps","server_name","server_loc","server_id","isp","internalIp","externalIp","uuid"]
     rows = [",".join(head)]
     from datetime import datetime
-    for it in reversed(items):  # CSV in ordine cronologico
+    for it in reversed(items):
         ts = int(it.get("ts",0))
         iso = datetime.utcfromtimestamp(ts).isoformat()+"Z" if ts else ""
         vals = [
             str(ts), iso, it.get("tool",""), str(bool(it.get("ok"))).lower(),
+            it.get("tag",""),
             str(it.get("ping_ms") if it.get("ping_ms") is not None else ""),
             str(it.get("jitter_ms") if it.get("jitter_ms") is not None else ""),
             str(it.get("loss_pct") if it.get("loss_pct") is not None else ""),
@@ -534,37 +556,82 @@ def history_export_csv():
             (it.get("server_name") or ""), (it.get("server_loc") or ""), str(it.get("server_id") or ""),
             (it.get("isp") or ""), (it.get("internalIp") or ""), (it.get("externalIp") or ""), (it.get("uuid") or "")
         ]
-        # escape minimale per virgole/virgolette
         vals = [('"'+v.replace('"','""')+'"') if ("," in v or '"' in v or " " in v) else v for v in vals]
         rows.append(",".join(vals))
     csv = "\n".join(rows) + "\n"
     return Response(content=csv, media_type="text/csv", headers={"Content-Disposition":"attachment; filename=speedtest-history.csv"})
 
+# ----------------- Settings UI -----------------
 @router.get("/settings", response_class=HTMLResponse)
 def st_settings():
     c=_cfg_load()
-    html=_page_head("Speedtest • Impostazioni")+f"""
+    checked = "checked" if c.get("enabled", True) else ""
+    prefer = (c.get("prefer") or "auto").lower()
+
+    head = _page_head("Speedtest • Impostazioni")
+
+    form = f"""
 <div class='grid'>
   <div class='card'>
     <h2>Schedulazione</h2>
     <form method='post' action='/speedtest/settings'>
-      <label>Intervallo (minuti)</label>
+      <label><input type='checkbox' name='enabled' value='1' {checked}/> Abilita scheduler</label>
+
+      <label style='margin-top:8px'>Intervallo (minuti)</label>
       <input name='interval_min' type='number' min='5' step='5' value='{int(c.get("interval_min",120))}'/>
-      <label>Retention storico (giorni)</label>
-      <input name='retention_days' type='number' min='1' value='{int(c.get("retention_days",90))}'/>
-      <div class='row' style='gap:8px;margin-top:8px'>
+
+      <label style='margin-top:8px'>Conserva al massimo N record</label>
+      <input name='retention_max' type='number' min='10' step='10' value='{int(c.get("retention_max",10000))}'/>
+
+      <label style='margin-top:8px'>Preferisci tool</label>
+      <select name='prefer'>
+        <option value='auto'  {"selected" if prefer=="auto" else ""}>Auto (Ookla se presente, altrimenti Python)</option>
+        <option value='ookla' {"selected" if prefer=="ookla" else ""}>Ookla CLI</option>
+        <option value='pycli' {"selected" if prefer=="pycli" else ""}>Python speedtest-cli</option>
+      </select>
+
+      <label style='margin-top:8px'>Server ID (opzionale)</label>
+      <input name='server_id' value='{escape(str(c.get("server_id") or ""))}' placeholder='es. 12345' />
+
+      <label style='margin-top:8px'>Tag (es. "sede1/FTTH TIM")</label>
+      <input name='tag' value='{escape(c.get("tag") or "")}' />
+
+      <div class='row' style='gap:8px;margin-top:12px'>
         <button class='btn' type='submit'>Salva</button>
         <a class='btn secondary' href='/speedtest/'>Torna</a>
-        <button class='btn' formaction='/speedtest/start' formmethod='post'>Esegui ora</button>
+        <button class='btn' type='button' onclick='runNow()'>Esegui ora</button>
       </div>
-      <p class='muted'>Il job gira via systemd ogni 5 minuti e avvia un test solo se l'ultimo è più vecchio dell'intervallo.</p>
+      <p class='muted' style='margin-top:6px'>Il job schedulato esegue periodicamente ma parte solo se è trascorso l'intervallo impostato. Se disabilitato, non esegue nulla.</p>
     </form>
   </div>
-</div></div></body></html>
+</div>
 """
-    return HTMLResponse(html)
+    script = """
+<script>
+async function runNow(){
+  try { await fetch('/speedtest/start', {method:'POST'}); } catch(e) {}
+  location.href='/speedtest/?start=1';
+}
+</script>
+</div></body></html>
+"""
+    return HTMLResponse(head + form + script)
 
 @router.post("/settings", response_class=HTMLResponse)
-def st_settings_save(interval_min: int = Form(120), retention_days: int = Form(90)):
-    c=_cfg_load(); c["interval_min"]=int(interval_min); c["retention_days"]=int(retention_days); _cfg_save(c)
+def st_settings_save(
+    enabled: str | None = Form(None),
+    interval_min: int = Form(120),
+    retention_max: int = Form(10000),
+    prefer: str = Form("auto"),
+    server_id: str = Form(""),
+    tag: str = Form("")
+):
+    c=_cfg_load()
+    c["enabled"] = bool(enabled)
+    c["interval_min"]= max(5, int(interval_min))
+    c["retention_max"]= max(10, int(retention_max))
+    c["prefer"] = prefer if prefer in ("auto","ookla","pycli") else "auto"
+    c["server_id"] = (server_id or "").strip()
+    c["tag"] = (tag or "").strip()
+    _cfg_save(c)
     return HTMLResponse("<script>location.replace('/speedtest/settings');</script>")

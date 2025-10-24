@@ -99,7 +99,7 @@ deploy_systemd() {
   local UNIT_COLLECTOR="netprobe-flow-collector.service"
   local UNIT_EXPORTER_TMPL="netprobe-flow-exporter@.service"
 
-  step "Systemd: copio unit file"
+  step "Systemd: copio unit file API/Flows"
   install -D -m 0644 "${SCRIPT_DIR}/${UNIT_API_SVC}"       "${SYSTEMD_DIR}/${UNIT_API_SVC}"
   install -D -m 0644 "${SCRIPT_DIR}/${UNIT_API_SOCK}"      "${SYSTEMD_DIR}/${UNIT_API_SOCK}"
   install -D -m 0644 "${SCRIPT_DIR}/${UNIT_COLLECTOR}"     "${SYSTEMD_DIR}/${UNIT_COLLECTOR}"
@@ -167,6 +167,66 @@ EOF
   chmod 0440 /etc/sudoers.d/netprobe-hostname
   visudo -cf /etc/sudoers.d/netprobe-hostname >/dev/null || true
 
+  # ------------------ ALERTD: service + timer ------------------
+  step "Systemd: alertd (service + timer)"
+  cat > /etc/systemd/system/netprobe-alertd.service <<'EOF'
+[Unit]
+Description=TestMachine Alerts sweep
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/netprobe/app
+Environment=PYTHONPATH=/opt/netprobe/app
+User=netprobe
+Group=netprobe
+ExecStart=/opt/netprobe/venv/bin/python /opt/netprobe/app/jobs/alertd.py
+EOF
+
+  cat > /etc/systemd/system/netprobe-alertd.timer <<'EOF'
+[Unit]
+Description=Run TestMachine Alerts sweep every minute
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=1s
+Unit=netprobe-alertd.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  # ------------------ SPEEDTESTD: service + timer ------------------
+  step "Systemd: speedtestd (service + timer)"
+  cat > /etc/systemd/system/netprobe-speedtestd.service <<'EOF'
+[Unit]
+Description=TestMachine Speedtest sweep
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/netprobe/app
+Environment=PYTHONPATH=/opt/netprobe/app
+User=netprobe
+Group=netprobe
+ExecStart=/opt/netprobe/venv/bin/python /opt/netprobe/app/jobs/speedtestd.py
+EOF
+
+  cat > /etc/systemd/system/netprobe-speedtestd.timer <<'EOF'
+[Unit]
+Description=Run TestMachine Speedtest sweep every minute
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=1s
+Unit=netprobe-speedtestd.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
   step "systemctl daemon-reload & setup"
   systemctl daemon-reload
   command -v fuser >/dev/null 2>&1 && /usr/bin/fuser -k -n udp 2055 || true
@@ -182,41 +242,9 @@ EOF
     [[ -L "$link" ]] && systemctl disable "$(basename "$link")" || true
   done
 
-  # --- Alert daemon (unit + timer) ---
-  cat >/etc/systemd/system/netprobe-alertd.service <<'EOF'
-[Unit]
-Description=TestMachine Alerts sweep
-After=network-online.target
-
-[Service]
-Type=oneshot
-WorkingDirectory=/opt/netprobe/app
-Environment=PYTHONPATH=/opt/netprobe/app
-User=netprobe
-Group=netprobe
-ExecStart=/opt/netprobe/venv/bin/python /opt/netprobe/app/jobs/alertd.py
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  cat >/etc/systemd/system/netprobe-alertd.timer <<'EOF'
-[Unit]
-Description=Run TestMachine Alerts sweep every minute
-
-[Timer]
-OnBootSec=30s
-OnUnitActiveSec=60s
-AccuracySec=1s
-Unit=netprobe-alertd.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  # abilita/avvia timer
-  systemctl daemon-reload
+  # abilita i timer alert/speedtest
   systemctl enable --now netprobe-alertd.timer
+  systemctl enable --now netprobe-speedtestd.timer
 }
 deploy_systemd
 
@@ -262,18 +290,16 @@ a2enconf smokeping >/dev/null || true
 # =====================================================================
 # WORKDIR & SUDOERS GENERALI APP
 # =====================================================================
-step "Workdir app /var/lib/netprobe (+pcap/speedtest/voip/netmap)"
+step "Workdir app /var/lib/netprobe (+pcap/speedtest/voip/netmap/logs)"
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe /var/lib/netprobe/tmp
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/pcap
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/speedtest
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/voip /var/lib/netprobe/voip/captures
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/netmap /var/lib/netprobe/netmap/scans
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/logs
 [[ -f /var/lib/netprobe/voip/captures.json ]] || { echo '{"captures":[]}' >/var/lib/netprobe/voip/captures.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/captures.json; chmod 0660 /var/lib/netprobe/voip/captures.json; }
 [[ -f /var/lib/netprobe/voip/index.json    ]] || { echo '{"calls":{}, "rtp_streams":[], "built_ts":0}' >/var/lib/netprobe/voip/index.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/index.json; chmod 0660 /var/lib/netprobe/voip/index.json; }
-install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/netmap /var/lib/netprobe/netmap/scans
 [[ -f /var/lib/netprobe/netmap/index.json  ]] || { echo '{"scans":[]}' >/var/lib/netprobe/netmap/index.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/netmap/index.json; chmod 0660 /var/lib/netprobe/netmap/index.json; }
-
-# Directory log per audit/alert
-install -d -m 0770 -o root -g "${APP_GROUP}" /var/lib/netprobe/logs || true
 
 step "Sudoers operazioni UI"
 cat >/etc/sudoers.d/netprobe-ops <<'EOF'
@@ -306,13 +332,7 @@ Cmnd_Alias NP_UPDATE = \
   /bin/bash /opt/netprobe/install-testmachine.sh *, \
   /usr/bin/env DEBIAN_FRONTEND=noninteractive /opt/netprobe/install/install-testmachine.sh *, \
   /bin/bash /opt/netprobe/install/install-testmachine.sh *
-# Power (reboot/shutdown) + systemd-run per reboot pianificato
-Cmnd_Alias NP_POWER = \
-  /sbin/reboot, /usr/sbin/reboot, \
-  /bin/systemctl reboot, /usr/bin/systemctl reboot, \
-  /usr/sbin/shutdown -r now *, /usr/sbin/shutdown -r +* *, \
-  /bin/systemd-run *, /usr/bin/systemd-run *
-netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI, NP_UPDATE, NP_POWER
+netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI, NP_UPDATE
 EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -cf /etc/sudoers.d/netprobe-ops || { echo "Errore in /etc/sudoers.d/netprobe-ops"; exit 1; }
@@ -422,7 +442,7 @@ if ! command -v speedtest >/dev/null 2>&1; then
 fi
 
 # =====================================================================
-# SEED UTENTI APP + CONFIG ALERTS
+# SEED UTENTI APP + CONFIG
 # =====================================================================
 step "Seed /etc/netprobe/users.json (admin/admin se assente)"
 install -d -m 0770 -o root -g "${APP_GROUP}" /etc/netprobe
@@ -438,39 +458,31 @@ PY
   chgrp "${APP_GROUP}" /etc/netprobe/users.json
 fi
 
-# alerts.json di default (se mancante)
-if [[ ! -s /etc/netprobe/alerts.json ]]; then
-cat >/etc/netprobe/alerts.json <<'EOF'
+# Config speedtest (scheduler UI)
+if [[ ! -s /etc/netprobe/speedtest.json ]]; then
+cat >/etc/netprobe/speedtest.json <<'EOF'
 {
-  "channels": {
-    "telegram": { "enabled": false, "token": "", "chat_id": "" },
-    "slack":    { "enabled": false, "webhook_url": "" },
-    "email":    { "enabled": false, "smtp": "localhost", "from": "testmachine@localhost", "to": [] }
-  },
-  "checks": {
-    "smokeping": { "enabled": true, "rrd_fresh_min": 10, "database_file": "/etc/smokeping/config.d/Database" },
-    "disk":      { "enabled": true, "paths": ["/", "/var"], "warn_pct": 90 },
-    "services":  { "enabled": true, "list": ["netprobe-api.socket","apache2","smokeping","netprobe-flow-collector"] },
-    "speedtest": { "enabled": true, "down_min_mbps": 50, "up_min_mbps": 10, "ping_max_ms": 80 },
-    "cacti":     { "enabled": true, "url": "", "log_dir": "/usr/share/cacti/site/log", "log_stale_min": 10 },
-    "flow":      { "enabled": true, "dir": "/var/lib/netprobe/flows", "stale_min": 10 },
-    "auth":      { "enabled": true, "fail_threshold": 3, "window_min": 5 }
-  },
-  "throttle_min": 30,
-  "silence_until": 0
+  "enabled": true,
+  "interval_min": 120,
+  "retention_max": 10000,
+  "prefer": "auto",
+  "server_id": "",
+  "tag": ""
 }
 EOF
-  chown root:${APP_GROUP} /etc/netprobe/alerts.json
-  chmod 0660 /etc/netprobe/alerts.json
+  chown root:${APP_GROUP} /etc/netprobe/speedtest.json
+  chmod 0660 /etc/netprobe/speedtest.json
 fi
 
 # =====================================================================
 # RIAVVII & CHECK FINALI
 # =====================================================================
-step "Riavvio servizi (PHP-FPM/Apache/SmokePing)"
+step "Riavvio servizi (PHP-FPM/Apache/SmokePing) + timer alert/speedtest"
 systemctl reload php${PHPVER}-fpm || true
 systemctl restart smokeping || true
 systemctl reload apache2 || systemctl restart apache2
+systemctl enable --now netprobe-alertd.timer  || true
+systemctl enable --now netprobe-speedtestd.timer || true
 
 step "Check finali"
 systemctl is-active --quiet netprobe-api.socket && echo "API socket OK"
@@ -493,4 +505,5 @@ fi
 command -v speedtest >/dev/null 2>&1 && echo "Speedtest CLI presente." || echo "Speedtest CLI assente; fallback Python disponibile."
 
 echo -e "\nFATTO. Log: ${LOG}"
+
 echo "Benvenuto nel mondo del domani!"

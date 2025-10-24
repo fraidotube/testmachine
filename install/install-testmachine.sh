@@ -181,6 +181,42 @@ EOF
   for link in /etc/systemd/system/multi-user.target.wants/netprobe-flow-exporter@*.service; do
     [[ -L "$link" ]] && systemctl disable "$(basename "$link")" || true
   done
+
+  # --- Alert daemon (unit + timer) ---
+  cat >/etc/systemd/system/netprobe-alertd.service <<'EOF'
+[Unit]
+Description=TestMachine Alerts sweep
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/netprobe/app
+Environment=PYTHONPATH=/opt/netprobe/app
+User=netprobe
+Group=netprobe
+ExecStart=/opt/netprobe/venv/bin/python /opt/netprobe/app/jobs/alertd.py
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat >/etc/systemd/system/netprobe-alertd.timer <<'EOF'
+[Unit]
+Description=Run TestMachine Alerts sweep every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=1s
+Unit=netprobe-alertd.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  # abilita/avvia timer
+  systemctl daemon-reload
+  systemctl enable --now netprobe-alertd.timer
 }
 deploy_systemd
 
@@ -235,6 +271,9 @@ install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/voip /va
 [[ -f /var/lib/netprobe/voip/index.json    ]] || { echo '{"calls":{}, "rtp_streams":[], "built_ts":0}' >/var/lib/netprobe/voip/index.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/index.json; chmod 0660 /var/lib/netprobe/voip/index.json; }
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/netmap /var/lib/netprobe/netmap/scans
 [[ -f /var/lib/netprobe/netmap/index.json  ]] || { echo '{"scans":[]}' >/var/lib/netprobe/netmap/index.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/netmap/index.json; chmod 0660 /var/lib/netprobe/netmap/index.json; }
+
+# Directory log per audit/alert
+install -d -m 0770 -o root -g "${APP_GROUP}" /var/lib/netprobe/logs || true
 
 step "Sudoers operazioni UI"
 cat >/etc/sudoers.d/netprobe-ops <<'EOF'
@@ -383,7 +422,7 @@ if ! command -v speedtest >/dev/null 2>&1; then
 fi
 
 # =====================================================================
-# SEED UTENTI APP
+# SEED UTENTI APP + CONFIG ALERTS
 # =====================================================================
 step "Seed /etc/netprobe/users.json (admin/admin se assente)"
 install -d -m 0770 -o root -g "${APP_GROUP}" /etc/netprobe
@@ -397,6 +436,32 @@ p.write_text(json.dumps({"users":{"admin":{"pw":h("admin"),"roles":["admin"]}}},
 os.chmod(p,0o660)
 PY
   chgrp "${APP_GROUP}" /etc/netprobe/users.json
+fi
+
+# alerts.json di default (se mancante)
+if [[ ! -s /etc/netprobe/alerts.json ]]; then
+cat >/etc/netprobe/alerts.json <<'EOF'
+{
+  "channels": {
+    "telegram": { "enabled": false, "token": "", "chat_id": "" },
+    "slack":    { "enabled": false, "webhook_url": "" },
+    "email":    { "enabled": false, "smtp": "localhost", "from": "testmachine@localhost", "to": [] }
+  },
+  "checks": {
+    "smokeping": { "enabled": true, "rrd_fresh_min": 10, "database_file": "/etc/smokeping/config.d/Database" },
+    "disk":      { "enabled": true, "paths": ["/", "/var"], "warn_pct": 90 },
+    "services":  { "enabled": true, "list": ["netprobe-api.socket","apache2","smokeping","netprobe-flow-collector"] },
+    "speedtest": { "enabled": true, "down_min_mbps": 50, "up_min_mbps": 10, "ping_max_ms": 80 },
+    "cacti":     { "enabled": true, "url": "", "log_dir": "/usr/share/cacti/site/log", "log_stale_min": 10 },
+    "flow":      { "enabled": true, "dir": "/var/lib/netprobe/flows", "stale_min": 10 },
+    "auth":      { "enabled": true, "fail_threshold": 3, "window_min": 5 }
+  },
+  "throttle_min": 30,
+  "silence_until": 0
+}
+EOF
+  chown root:${APP_GROUP} /etc/netprobe/alerts.json
+  chmod 0660 /etc/netprobe/alerts.json
 fi
 
 # =====================================================================

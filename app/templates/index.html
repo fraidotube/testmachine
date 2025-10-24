@@ -67,6 +67,10 @@
       background: linear-gradient(160deg, rgba(0,0,0,0.25), rgba(200,200,200,.10));
       border: 1px solid rgba(99,102,241,.35);
     }
+    .card--alerts{
+      background: linear-gradient(160deg, rgba(200,100,100,0.25), rgba(100,0,100,.10));
+      border: 1px solid rgba(255,255,255,.35);
+    }
 
     /* titoli sezioni */
     .section-title{margin-top:18px}
@@ -218,6 +222,14 @@
         </h2>
         <p class="muted">Shell bash con login (password root).</p>
         <a class="btn" href="/shell/">Apri Shell</a>
+      </div>
+      <div class="card card--tool card--alerts" style="margin-top:6px">
+        <h2>
+          <img class="tool-icon" src="/static/img/alerts.svg" alt="Alerts" onerror="this.style.display='none'">
+          Alerts
+        </h2>
+        <p class="muted">Bot Telegram per allarmi.</p>
+        <a class="btn" href="/alerts/">Apri Alerts</a>
       </div>
     </div>
     

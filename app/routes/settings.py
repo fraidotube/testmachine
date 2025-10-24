@@ -452,11 +452,13 @@ def _safe_log_from_id(log_id: str) -> str | None:
 
 def _start_update_unit(branch: str, unit: str, log_path: str) -> tuple[int, str]:
     """
-    Avvia una unit systemd transiente che:
+    Unit transiente (root) che:
+      - ferma servizi APT automatici (soft)
+      - attende i lock APT/dpkg
+      - prova la riparazione dpkg interrotto
       - git fetch/reset (utente 'netprobe')
-      - esegue installer come root
-      - scrive su log_path
-      - a fine run schedula reboot in 10s (sempre)
+      - esegue installer (root)
+      - se RC==0, programma reboot in 10s
     """
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     open(log_path, "a").close()
@@ -464,20 +466,53 @@ def _start_update_unit(branch: str, unit: str, log_path: str) -> tuple[int, str]
     if not inst:
         script = f'echo "[ERRORE] installer non trovato" >> {log_path} 2>&1; exit 1'
     else:
-        # N.B. la unit gira come root; per git usiamo 'sudo -u netprobe'
         script = (
             f'LOG="{log_path}"; '
             f'echo "[UPDATE] start $(date -Ins)" >> "$LOG" 2>&1; '
+            f'echo "[WHOAMI] uid=$(id -u) user=$(whoami)" >> "$LOG" 2>&1; '
+
+            # stop soft di servizi/timer che possono tenere lock
+            'systemctl try-stop --no-block apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true; '
+            'systemctl try-stop --no-block apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true; '
+
+            # attesa lock (max ~10 min)
+            'for i in $(seq 1 300); do '
+            '  if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 '
+            '     && ! fuser /var/lib/dpkg/lock >/dev/null 2>&1 '
+            '     && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then '
+            '       break; '
+            '  fi; '
+            '  echo "[WAIT] dpkg/apt lock in use, retry..." >> "$LOG" 2>&1; '
+            '  sleep 2; '
+            'done; '
+
+            # preflight riparazione dpkg interrotto
+            'export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none; '
+            'echo "[PRE] dpkg --configure -a" >> "$LOG" 2>&1; '
+            'dpkg --configure -a >> "$LOG" 2>&1 || true; '
+            'echo "[PRE] apt-get -f install" >> "$LOG" 2>&1; '
+            'apt-get -o Dpkg::Lock::Timeout=600 -y -f install >> "$LOG" 2>&1 || true; '
+
+            # sync codice come netprobe
             f'sudo -u netprobe -H git -C {REPO_DIR} fetch --all --prune >> "$LOG" 2>&1; '
             f'sudo -u netprobe -H git -C {REPO_DIR} reset --hard origin/{branch} >> "$LOG" 2>&1; '
+
+            # installer (root)
             f'DEBIAN_FRONTEND=noninteractive /bin/bash {inst} --update >> "$LOG" 2>&1; '
-            f'RC=$?; echo "[UPDATE] done rc=$RC $(date -Ins)" >> "$LOG" 2>&1; '
-            f'echo "[REBOOT] scheduling in 10s" >> "$LOG" 2>&1; '
-            f'/bin/systemd-run --unit testmachine-reboot --on-active=10 /sbin/reboot >> "$LOG" 2>&1; '
-            f'exit $RC'
+            'RC=$?; echo "[UPDATE] done rc=$RC $(date -Ins)" >> "$LOG" 2>&1; '
+
+            # reboot solo se OK
+            'if [ "$RC" -eq 0 ]; then '
+            '  echo "[REBOOT] scheduling in 10s" >> "$LOG" 2>&1; '
+            '  /bin/systemd-run --unit testmachine-reboot --on-active=10 /sbin/reboot >> "$LOG" 2>&1; '
+            'else '
+            '  echo "[REBOOT] skipped due to rc=$RC" >> "$LOG" 2>&1; '
+            'fi; '
+            'exit $RC'
         )
-    rc, out, err = _systemd_run(["--unit", unit, "--collect", "/bin/bash", "-lc", script])
+    rc, out, err = _systemd_run(["--unit", unit, "--collect", "--uid", "root", "/bin/bash", "-lc", script])
     return rc, (err or "")
+
 
 @router.post("/update", response_class=HTMLResponse)
 def update_from_git(request: Request, branch: str = Form("main")):

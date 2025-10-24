@@ -3,7 +3,7 @@ from fastapi import APIRouter, Form, Body, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from pathlib import Path
 from html import escape
-import subprocess, os, json, time, signal, shutil
+import subprocess, os, json, time, signal, shutil, pathlib
 
 router = APIRouter(prefix="/speedtest", tags=["speedtest"])
 
@@ -125,9 +125,148 @@ def _pick_cmd(cfg: dict) -> tuple[list[str], str]:
     cmd = [py, "-c", code, server_id]
     return (cmd, "pycli")
 
+# ====== CARD GRAFICI (HTML+JS) =================================================
+charts_card = """
+<div class='card'>
+  <div style='display:flex; align-items:center; gap:10px; justify-content:space-between; flex-wrap:wrap'>
+    <h2 style='margin:0'>Grafici speedtest</h2>
+    <div style='display:flex; gap:8px; align-items:center'>
+      <button class='btn secondary' id='btnRange24h'>24h</button>
+      <button class='btn secondary' id='btnRange7d'>7g</button>
+      <button class='btn secondary' id='btnRange30d'>30g</button>
+      <button class='btn secondary' id='btnRangeAll'>Tutto</button>
+      <label class='muted' style='margin-left:10px'>
+        <input type='checkbox' id='maToggle'/> Media
+      </label>
+      <button class='btn' id='btnChartReload'>Aggiorna</button>
+    </div>
+  </div>
+
+  <div style='margin-top:10px'>
+    <h3 style='margin:8px 0 4px 0'>Download / Upload (Mbps)</h3>
+    <canvas id='chartDu' width='1200' height='220' style='width:100%; max-width:100%'></canvas>
+  </div>
+  <div style='margin-top:14px'>
+    <h3 style='margin:8px 0 4px 0'>Ping / Jitter (ms)</h3>
+    <canvas id='chartPj' width='1200' height='220' style='width:100%; max-width:100%'></canvas>
+  </div>
+
+  <p class='muted small' id='chartInfo' style='margin-top:8px'></p>
+</div>
+
+<script>
+(function(){
+  const qs = s=>document.querySelector(s);
+  const du = qs('#chartDu'), pj = qs('#chartPj');
+  const info = qs('#chartInfo');
+  let rangeSec = 24*3600;  // default 24h
+
+  function avg(arr, w){
+    const out=[]; let s=0, q=[];
+    for(const v of arr){
+      q.push(v); s += v;
+      if(q.length>w){ s -= q.shift(); }
+      out.push( q.length ? s/q.length : v );
+    }
+    return out;
+  }
+
+  function draw(canvas, xs, series, yLabel){
+    const W = canvas.width, H = canvas.height;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0,0,W,H);
+
+    const padL=48, padR=12, padT=10, padB=22;
+    const w = W - padL - padR, h = H - padT - padB;
+    if(xs.length===0){ ctx.fillStyle='#bbb'; ctx.fillText('Nessun dato', padL+10, padT+20); return; }
+
+    let yMin=+Infinity, yMax=-Infinity;
+    for(const s of series){
+      for(const v of s.values){ if(v==null) continue; if(v<yMin) yMin=v; if(v>yMax) yMax=v; }
+    }
+    if(!isFinite(yMin)||!isFinite(yMax)){ yMin=0; yMax=1; }
+    if(yMax===yMin){ yMax=yMin+1; }
+
+    function y2p(v){ return padT + h - ( (v - yMin) / (yMax - yMin) ) * h; }
+    function x2p(i){ return padL + (i/(xs.length-1)) * w; }
+
+    // griglia
+    const grid='rgba(255,255,255,0.08)';
+    const text='rgba(255,255,255,0.75)';
+    ctx.strokeStyle=grid; ctx.lineWidth=1; ctx.beginPath();
+    for(let i=0;i<=5;i++){
+      const yy = padT + (i/5)*h; ctx.moveTo(padL, yy); ctx.lineTo(W-padR, yy);
+    }
+    ctx.stroke();
+
+    // assi/etichette
+    ctx.fillStyle=text; ctx.font='12px system-ui, sans-serif';
+    ctx.textAlign='right'; ctx.textBaseline='middle';
+    for(let i=0;i<=5;i++){
+      const vv = yMin + (i/5)*(yMax-yMin);
+      const yy = padT + (1-i/5)*h;
+      ctx.fillText(vv.toFixed( (yMax-yMin)<10 ? 1 : 0 ), padL-6, yy);
+    }
+    ctx.save(); ctx.translate(10, padT + h/2); ctx.rotate(-Math.PI/2); ctx.fillText(yLabel, 0, 0); ctx.restore();
+
+    const colors = ['#58a6ff','#8b949e','#2ea043','#db61a2'];
+    series.forEach((s,si)=>{
+      ctx.strokeStyle = colors[si % colors.length];
+      ctx.lineWidth = 2; ctx.beginPath();
+      s.values.forEach((v,i)=>{ if(v==null) return; const X=x2p(i), Y=y2p(v); if(i===0) ctx.moveTo(X,Y); else ctx.lineTo(X,Y); });
+      ctx.stroke();
+      // legenda
+      ctx.fillStyle=colors[si%colors.length]; ctx.fillRect(W-100, padT+6+si*16, 10,10);
+      ctx.fillStyle=text; ctx.textAlign='left'; ctx.textBaseline='top'; ctx.fillText(s.label, W-86, padT+4+si*16);
+    });
+  }
+
+  function fetchSeries(){
+    const now = Math.floor(Date.now()/1000);
+    const url = rangeSec>0 ? `/speedtest/history/series?frm=${now-rangeSec}&to=${now}&limit=2000`
+                           : `/speedtest/history/series?limit=2000`;
+    fetch(url).then(r=>r.json()).then(js=>{
+      const pts = (js && js.points)||[];
+      info.textContent = `Punti: ${pts.length}` + (rangeSec?` • finestra: ${Math.round(rangeSec/3600)}h`:'');
+      const xs = pts.map(p=>p.ts);
+      const ma = qs('#maToggle')?.checked;
+      const w  = 5;
+
+      const mbps = v => v==null ? null : Math.round(v*100)/100;
+
+      // down/up
+      let down = pts.map(p=>mbps(p.down_mbps)), up = pts.map(p=>mbps(p.up_mbps));
+      if(ma){ down = avg(down,w); up = avg(up,w); }
+      draw(du, xs, [
+        {label:'Download', values:down},
+        {label:'Upload',   values:up}
+      ], 'Mbps');
+
+      // ping/jitter
+      let p = pts.map(x=>x.ping_ms), j = pts.map(x=>x.jitter_ms);
+      if(ma){ p = avg(p,w); j = avg(j,w); }
+      draw(pj, xs, [
+        {label:'Ping',   values:p},
+        {label:'Jitter', values:j}
+      ], 'ms');
+    }).catch(()=>{ info.textContent='Errore caricamento serie'; });
+  }
+
+  document.getElementById('btnChartReload').addEventListener('click', fetchSeries);
+  document.getElementById('maToggle').addEventListener('change', fetchSeries);
+  document.getElementById('btnRange24h').addEventListener('click', ()=>{rangeSec=24*3600; fetchSeries();});
+  document.getElementById('btnRange7d').addEventListener('click', ()=>{rangeSec=7*24*3600; fetchSeries();});
+  document.getElementById('btnRange30d').addEventListener('click', ()=>{rangeSec=30*24*3600; fetchSeries();});
+  document.getElementById('btnRangeAll').addEventListener('click', ()=>{rangeSec=0; fetchSeries();});
+  setTimeout(fetchSeries, 10);
+})();
+</script>
+"""
+
 @router.get("/", response_class=HTMLResponse)
 def page(request: Request):
-    html = _page_head("Speedtest") + """
+    head = _page_head("Speedtest")
+    body = """
 <style>
   :root{ --st-a:#10b981; --st-b:#059669; }
   .card--st{ background:linear-gradient(160deg, rgba(16,185,129,.22), rgba(5,150,105,.10)); border:1px solid rgba(16,185,129,.30); }
@@ -141,11 +280,107 @@ def page(request: Request):
   .phase{display:inline-flex;gap:6px;align-items:center;margin-top:6px}
   .dot{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.25)} .on{background:var(--st-a)}
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  .table{overflow-x:auto} table{width:100%;border-collapse:collapse} th,td{padding:6px 8px;white-space:nowrap}
   .small{font-size:.92em;opacity:.95}
+  /* --- Speedtest card: layout 2 colonne + stat tiles --- */
+.st-grid{
+  display:grid;
+  grid-template-columns: 1fr 1fr;
+  gap:16px;
+  margin-top:12px;
+}
+@media (max-width: 980px){
+  .st-grid{ grid-template-columns: 1fr; }
+}
+
+.details .kv{ grid-template-columns: 110px 1fr; } /* già presente, solo rifinitura */
+
+.stats{
+  display:grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap:12px;
+}
+@media (max-width: 640px){
+  .stats{ grid-template-columns: 1fr; }
+}
+
+.stat{
+  padding:12px 14px;
+  border-radius:12px;
+  background:rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.10);
+}
+.stat .label{
+  font-size:.88rem;
+  opacity:.85;
+  margin-bottom:6px;
+}
+.stat .value{
+  font-weight:600;        /* meno “pesante” del 700 */
+  font-size:1.5rem;       /* meno enorme: era 1.8rem */
+  letter-spacing:.2px;
+}
+.stat .unit{
+  opacity:.8;
+  font-size:.95rem;
+  margin-left:4px;
+}
+
+.stat-meta{
+  margin-top:8px;
+  font-size:.95rem;
+  opacity:.9;
+}
+.stat-meta .kvline{
+  display:flex; gap:12px; flex-wrap:wrap;
+}
+.stat-meta .kvline span{ opacity:.85; }
+
+
+  /* —— layout verticale: 3 card impilate, mai fuori pagina —— */
+  .container{ max-width: 1200px; }          /* contenitore più compatto */
+  .grid--stack{ grid-template-columns: 1fr; gap: 14px; }
+  .card{ min-width: 0; }                    /* abilita shrink */
+  .table{ overflow-x:auto; }
+  #histTbl{ width:100%; border-collapse:collapse; table-layout:auto; }  /* <— auto, non fixed */
+  #histTbl th, #histTbl td{
+  padding:6px 8px;
+  white-space:nowrap;         /* niente a capo (niente …) */
+  }
+
+  /* Larghezze minime e allineamenti */
+  #histTbl th:first-child, #histTbl td:first-child{  /* selezione */
+  width: 36px; min-width:36px; text-align:center;
+   }
+   #histTbl th:nth-child(2), #histTbl td:nth-child(2){ /* Quando */
+   width: 200px; min-width:200px;
+   }
+  #histTbl th:nth-child(3), #histTbl td:nth-child(3),  /* Ping */
+  #histTbl th:nth-child(4), #histTbl td:nth-child(4),  /* Jitter */
+    #histTbl th:nth-child(5), #histTbl td:nth-child(5){  /* Loss */
+    width: 80px; min-width:80px; text-align:right;
+    }
+    #histTbl th:nth-child(6), #histTbl td:nth-child(6),  /* Download */
+    #histTbl th:nth-child(7), #histTbl td:nth-child(7){  /* Upload   */
+    width: 130px; min-width:130px; text-align:right;
+    }
+    #histTbl th:nth-child(8), #histTbl td:nth-child(8){  /* Server */
+    min-width: 240px;
+    }
+    #histTbl th:nth-child(9), #histTbl td:nth-child(9){  /* ISP */
+    min-width: 160px;
+    }
+    #histTbl th:nth-child(10), #histTbl td:nth-child(10){/* IP */
+    min-width: 240px;
+    }  
+
+/* checkbox ben visibile e non schiacciata */
+#histTbl td:first-child input{ transform:scale(1.05); cursor:pointer; }
+  .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; 
+       font-variant-numeric: tabular-nums; }
+
 </style>
 
-<div class='grid'>
+<div class='grid grid--stack'>
   <div class='card card--st'>
     <div class='hero'>
       <h2>Speedtest</h2>
@@ -157,28 +392,56 @@ def page(request: Request):
     <p class='muted'>Misura ping, download e upload.</p>
 
     <div id="pre-box">
-      <button class='btn' onclick='startTest()'>Avvia test</button>
-    </div>
+  <button class='btn' onclick='startTest()'>Avvia test</button>
+</div>
 
-    <div id="run-box" style="display:none">
-      <div class="meter" style="margin:10px 0 6px"><div class="bar"></div></div>
-      <div class="phase"><span id="ph1" class="dot"></span><span>Ping</span></div>
-      <div class="phase"><span id="ph2" class="dot"></span><span>Download</span></div>
-      <div class="phase"><span id="ph3" class="dot"></span><span>Upload</span></div>
-      <button class='btn secondary' style="margin-top:10px" onclick='cancelTest()'>Annulla</button>
-    </div>
+<div id="run-box" style="display:none">
+  <div class="meter" style="margin:10px 0 6px"><div class="bar"></div></div>
+  <div class="phase"><span id="ph1" class="dot"></span><span>Ping</span></div>
+  <div class="phase"><span id="ph2" class="dot"></span><span>Download</span></div>
+  <div class="phase"><span id="ph3" class="dot"></span><span>Upload</span></div>
+  <button class='btn secondary' style="margin-top:10px" onclick='cancelTest()'>Annulla</button>
+</div>
 
-    <div id="res-box" style="display:none;margin-top:12px">
+<div id="res-box" style="display:none;margin-top:4px">
+  <div class="st-grid">
+    <!-- Colonna sinistra: dettagli -->
+    <div class="details">
       <div class="kv"><div>Server</div><div id="sv"></div></div>
       <div class="kv"><div>ISP</div><div id="isp"></div></div>
       <div class="kv"><div>IP</div><div id="ips"></div></div>
-      <div class="kv"><div>Ping</div><div class="big" id="pg">-</div></div>
-      <div class="kv"><div>Jitter</div><div id="jit">-</div></div>
-      <div class="kv"><div>Loss</div><div id="pl">-</div></div>
-      <div class="kv"><div>Download</div><div class="big" id="dl">-</div></div>
-      <div class="kv"><div>Upload</div><div class="big" id="ul">-</div></div>
-      <button class='btn' style="margin-top:10px" onclick='startTest()'>Riesegui</button>
+      
     </div>
+
+    <!-- Colonna destra: tiles -->
+    <div>
+      <div class="stats">
+        <div class="stat">
+          <div class="label">Ping</div>
+          <div class="value"><span id="pg">-</span></div>
+        </div>
+        <div class="stat">
+          <div class="label">Download</div>
+          <div class="value"><span id="dl">-</span> <span class="unit"></span></div>
+        </div>
+        <div class="stat">
+          <div class="label">Upload</div>
+          <div class="value"><span id="ul">-</span> <span class="unit"></span></div>
+        </div>
+      </div>
+
+      <div class="stat-meta">
+        <div class="kvline">
+          <span><b>Jitter:</b> <span id="jit">-</span></span>
+          <span><b>Loss:</b> <span id="pl">-</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class='muted' id='tool-note' style="margin-top:10px"></div>
+
 
     <div class='muted' id='tool-note' style="margin-top:10px"></div>
   </div>
@@ -197,18 +460,23 @@ def page(request: Request):
     <div class='table' style='margin-top:8px'>
       <table id="histTbl">
         <thead>
-          <tr><th></th><th>Quando</th><th>Ping</th><th>Jitter</th><th>Loss</th><th>Download</th><th>Upload</th><th>Server</th><th>ISP</th><th>IP</th></tr>
+          <tr>
+            <th></th><th>Quando</th><th>Ping</th><th>Jitter</th><th>Loss</th>
+            <th>Download</th><th>Upload</th><th>Server</th><th>ISP</th><th>IP</th>
+          </tr>
         </thead>
         <tbody></tbody>
       </table>
     </div>
     <div class='small muted' id='histNote' style='margin-top:6px'></div>
   </div>
+
+""" + charts_card + """
 </div>
 
 </div>
 <script>
-let timer=null, phase=0, histOnce=true; // FIX: non ricaricare la tabella continuamente
+let timer=null, phase=0, histOnce=true;
 
 function humanBitsps(bps){ if(!bps) return "-"; const u=["bps","Kbps","Mbps","Gbps","Tbps"]; let i=0,v=Number(bps); while(v>=1000 && i<u.length-1){ v/=1000; i++; } return v.toFixed(2)+" "+u[i]; }
 function setPhase(p){ phase=p; for(let i=1;i<=3;i++){ document.getElementById('ph'+i).classList.toggle('on', i<=p); }}
@@ -254,7 +522,7 @@ async function status(){
     document.getElementById('ul').textContent = humanBitsps(u);
 
     document.getElementById('res-box').style.display = "";
-    if(!histOnce){ histOnce=true; histRefresh(); } // FIX: aggiorna storico una sola volta a fine test
+    if(!histOnce){ histOnce=true; histRefresh(); }
   } else {
     document.getElementById('res-box').style.display = "none";
   }
@@ -265,15 +533,15 @@ function histRow(tr, it){
   const sv = [it.server_name, it.server_loc].filter(Boolean).join(" · ");
   tr.innerHTML = `
     <td><input type="checkbox" data-ts="${it.ts}"></td>
-    <td class="mono">${new Date(it.ts*1000).toLocaleString()}</td>
+    <td class="mono trunc">${new Date(it.ts*1000).toLocaleString('it-IT', { hour12:false })}</td>
     <td class="mono" style="text-align:right">${it.ping_ms!=null ? (+it.ping_ms).toFixed(2)+' ms' : '-'}</td>
     <td class="mono" style="text-align:right">${it.jitter_ms!=null ? (+it.jitter_ms).toFixed(2)+' ms' : '-'}</td>
     <td class="mono" style="text-align:right">${it.loss_pct!=null ? it.loss_pct+' %' : '-'}</td>
     <td class="mono" style="text-align:right">${humanBitsps(it.down_bps)}</td>
     <td class="mono" style="text-align:right">${humanBitsps(it.up_bps)}</td>
-    <td class="mono">${sv || '-'}</td>
-    <td class="mono">${it.isp || '-'}</td>
-    <td class="mono">${iptxt || '-'}</td>
+    <td class="mono trunc">${sv || '-'}</td>
+    <td class="mono trunc">${it.isp || '-'}</td>
+    <td class="mono trunc">${iptxt || '-'}</td>
   `;
 }
 
@@ -304,10 +572,9 @@ async function histDeleteSel(){
   histRefresh();
 }
 
-async function startTest(){ await fetch('/speedtest/start',{method:'POST'}); setPhase(1); histOnce=false; if(!timer){ timer=setInterval(status, 1000); } status(); } // FIX: histOnce=false all'avvio
+async function startTest(){ await fetch('/speedtest/start',{method:'POST'}); setPhase(1); histOnce=false; if(!timer){ timer=setInterval(status, 1000); } status(); }
 async function cancelTest(){ await fetch('/speedtest/cancel',{method:'POST'}); setPhase(0); status(); }
 
-// Auto-start via ?start=1
 (function(){
   const p = new URLSearchParams(location.search);
   if(p.get('start')==='1'){ startTest(); }
@@ -318,7 +585,7 @@ status(); histRefresh();
 </script>
 </body></html>
 """
-    return HTMLResponse(html)
+    return HTMLResponse(head + body)
 
 # ----------------- API di stato -----------------
 @router.get("/status", response_class=JSONResponse)
@@ -561,10 +828,11 @@ def history_export_csv():
     csv = "\n".join(rows) + "\n"
     return Response(content=csv, media_type="text/csv", headers={"Content-Disposition":"attachment; filename=speedtest-history.csv"})
 
+
 # ----------------- Settings UI -----------------
 @router.get("/settings", response_class=HTMLResponse)
 def st_settings():
-    c=_cfg_load()
+    c = _cfg_load()
     checked = "checked" if c.get("enabled", True) else ""
     prefer = (c.get("prefer") or "auto").lower()
 
@@ -601,7 +869,10 @@ def st_settings():
         <a class='btn secondary' href='/speedtest/'>Torna</a>
         <button class='btn' type='button' onclick='runNow()'>Esegui ora</button>
       </div>
-      <p class='muted' style='margin-top:6px'>Il job schedulato esegue periodicamente ma parte solo se è trascorso l'intervallo impostato. Se disabilitato, non esegue nulla.</p>
+      <p class='muted' style='margin-top:6px'>
+        Il job schedulato gira ogni minuto ma esegue il test solo se è passato almeno l'intervallo impostato.
+        Se disabilitato, non esegue nulla.
+      </p>
     </form>
   </div>
 </div>
@@ -617,6 +888,7 @@ async function runNow(){
 """
     return HTMLResponse(head + form + script)
 
+
 @router.post("/settings", response_class=HTMLResponse)
 def st_settings_save(
     enabled: str | None = Form(None),
@@ -626,12 +898,87 @@ def st_settings_save(
     server_id: str = Form(""),
     tag: str = Form("")
 ):
-    c=_cfg_load()
-    c["enabled"] = bool(enabled)
-    c["interval_min"]= max(5, int(interval_min))
-    c["retention_max"]= max(10, int(retention_max))
-    c["prefer"] = prefer if prefer in ("auto","ookla","pycli") else "auto"
-    c["server_id"] = (server_id or "").strip()
-    c["tag"] = (tag or "").strip()
+    c = _cfg_load()
+    c["enabled"]       = bool(enabled)
+    c["interval_min"]  = max(5, int(interval_min))
+    c["retention_max"] = max(10, int(retention_max))
+    c["prefer"]        = prefer if prefer in ("auto","ookla","pycli") else "auto"
+    c["server_id"]     = (server_id or "").strip()
+    c["tag"]           = (tag or "").strip()
     _cfg_save(c)
+    # torniamo alla pagina settings per vedere i valori aggiornati
     return HTMLResponse("<script>location.replace('/speedtest/settings');</script>")
+
+
+
+# ----------------- Serie per grafici -----------------
+_SPEED_DIR = pathlib.Path("/var/lib/netprobe/speedtest")
+_SPEED_HIST = _SPEED_DIR / "history.jsonl"
+
+def _tail_history(max_lines: int = 2000):
+    """Legge velocemente le ultime N righe dello storico (se esiste)."""
+    if not _SPEED_HIST.exists():
+        return []
+    lines = []
+    with open(_SPEED_HIST, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        pos = f.tell()
+        buf = b""
+        while pos > 0 and len(lines) < max_lines:
+            step = min(8192, pos)
+            pos -= step
+            f.seek(pos)
+            chunk = f.read(step)
+            buf = chunk + buf
+            *rest, buf = buf.split(b"\n")
+            for ln in reversed(rest):
+                if ln.strip():
+                    try:
+                        lines.append(json.loads(ln.decode("utf-8")))
+                    except Exception:
+                        pass
+            f.seek(pos)
+        if buf.strip() and len(lines) < max_lines:
+            try:
+                lines.append(json.loads(buf.decode("utf-8")))
+            except Exception:
+                pass
+    return list(reversed(lines))  # ordine cronologico crescente
+
+@router.get("/history/series")
+def speedtest_series(request: Request,
+                     frm: int | None = None,  # epoch sec "from"
+                     to:  int | None = None,  # epoch sec "to"
+                     limit: int = 1000):
+    """
+    Restituisce punti storici per i grafici.
+    Output: {"points":[{ts, down_mbps, up_mbps, ping_ms, jitter_ms, loss_pct}]}
+    """
+    now = int(time.time())
+    t0  = int(frm or 0)
+    t1  = int(to or now)
+
+    rows = _tail_history(max_lines=max(200, min(50000, limit*5 or 1000)))
+    pts  = []
+    for r in rows:
+        ts = int(r.get("ts") or 0)
+        if ts < t0 or ts > t1:
+            continue
+        def mbps(bps):
+            try:
+                return round((float(bps) or 0.0)/1_000_000.0, 2)
+            except Exception:
+                return 0.0
+        pts.append({
+            "ts": ts,
+            "down_mbps": mbps(r.get("down_bps")),
+            "up_mbps":   mbps(r.get("up_bps")),
+            "ping_ms":   float(r.get("ping_ms") or 0.0),
+            "jitter_ms": float(r.get("jitter_ms") or 0.0),
+            "loss_pct":  float(r.get("loss_pct") or 0.0),
+        })
+
+    if limit and len(pts) > limit:
+        pts = pts[-limit:]
+
+    return JSONResponse({"ok": True, "points": pts})

@@ -1,0 +1,11 @@
+[Unit]
+Description=Trigger speedtest scheduler every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=netprobe-speedtest.service
+
+[Install]
+WantedBy=timers.target

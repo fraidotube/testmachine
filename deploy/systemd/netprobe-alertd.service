@@ -1,0 +1,9 @@
+[Unit]
+Description=TestMachine Alerts sweep
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=netprobe
+Group=netprobe
+ExecStart=/opt/netprobe/venv/bin/python /opt/netprobe/app/jobs/alertd.py

@@ -11,6 +11,14 @@ STATE_FILE  = SPEED_DIR / "state.json"     # {"pid":int|null, "started":ts, "res
 LOG_FILE    = SPEED_DIR / "last.log"
 HIST_FILE   = SPEED_DIR / "history.jsonl"  # 1 riga JSON per test (append-only)
 
+SPEEDTEST_CFG = Path("/etc/netprobe/speedtest.json")
+def _cfg_load():
+    try: return json.loads(SPEEDTEST_CFG.read_text("utf-8"))
+    except Exception: return {"interval_min": 120, "retention_days": 90}
+def _cfg_save(c:dict):
+    tmp=SPEEDTEST_CFG.with_suffix(".tmp")
+    tmp.write_text(json.dumps(c,indent=2),encoding="utf-8"); os.replace(tmp,SPEEDTEST_CFG)
+
 # ----------------- helpers -----------------
 def _ensure_dir():
     SPEED_DIR.mkdir(parents=True, exist_ok=True)
@@ -531,3 +539,32 @@ def history_export_csv():
         rows.append(",".join(vals))
     csv = "\n".join(rows) + "\n"
     return Response(content=csv, media_type="text/csv", headers={"Content-Disposition":"attachment; filename=speedtest-history.csv"})
+
+@router.get("/settings", response_class=HTMLResponse)
+def st_settings():
+    c=_cfg_load()
+    html=_page_head("Speedtest • Impostazioni")+f"""
+<div class='grid'>
+  <div class='card'>
+    <h2>Schedulazione</h2>
+    <form method='post' action='/speedtest/settings'>
+      <label>Intervallo (minuti)</label>
+      <input name='interval_min' type='number' min='5' step='5' value='{int(c.get("interval_min",120))}'/>
+      <label>Retention storico (giorni)</label>
+      <input name='retention_days' type='number' min='1' value='{int(c.get("retention_days",90))}'/>
+      <div class='row' style='gap:8px;margin-top:8px'>
+        <button class='btn' type='submit'>Salva</button>
+        <a class='btn secondary' href='/speedtest/'>Torna</a>
+        <button class='btn' formaction='/speedtest/start' formmethod='post'>Esegui ora</button>
+      </div>
+      <p class='muted'>Il job gira via systemd ogni 5 minuti e avvia un test solo se l'ultimo è più vecchio dell'intervallo.</p>
+    </form>
+  </div>
+</div></div></body></html>
+"""
+    return HTMLResponse(html)
+
+@router.post("/settings", response_class=HTMLResponse)
+def st_settings_save(interval_min: int = Form(120), retention_days: int = Form(90)):
+    c=_cfg_load(); c["interval_min"]=int(interval_min); c["retention_days"]=int(retention_days); _cfg_save(c)
+    return HTMLResponse("<script>location.replace('/speedtest/settings');</script>")

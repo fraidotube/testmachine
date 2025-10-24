@@ -1,0 +1,9 @@
+[Unit]
+Description=TestMachine scheduled speedtest (run-if-due)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=netprobe
+Group=netprobe
+ExecStart=/opt/netprobe/venv/bin/python /opt/netprobe/app/jobs/speedtest_job.py

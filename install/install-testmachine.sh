@@ -457,6 +457,25 @@ fi
 # prima esecuzione (opzionale) – corretto: --force
 sudo -u www-data -- php /usr/share/cacti/site/poller.php --force || true
 
+
+# ---- Host tuning per OpenSearch/Mongo ----
+step "Tuning host per OpenSearch/Mongo (vm.max_map_count, file-max, AVX check)"
+# vm.max_map_count per OpenSearch
+sysctl -w vm.max_map_count=262144 >/dev/null
+# alziamo anche file-max in modo conservativo
+sysctl -w fs.file-max=131072 >/dev/null
+cat >/etc/sysctl.d/99-opensearch.conf <<'EOF'
+vm.max_map_count=262144
+fs.file-max=131072
+EOF
+sysctl --system >/dev/null || true
+
+# Avviso se la CPU non ha AVX/AVX2
+if ! grep -q -m1 -E 'avx(2)?' /proc/cpuinfo; then
+  echo "ATTENZIONE: CPU senza AVX -> OpenSearch 2.x e MongoDB 6 potrebbero non avviarsi."
+fi
+
+
 # =====================================================================
 # GRAYLOG (Docker stack)
 # =====================================================================

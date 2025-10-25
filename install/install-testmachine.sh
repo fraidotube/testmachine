@@ -477,7 +477,7 @@ else
 fi
 
 # (opzionale) prima esecuzione del poller
-sudo -u www-data -- php /usr/share/cacti/site/poller.php -f || true
+sudo -u www-data -- php /usr/share/cacti/site/poller.php -force || true
 
 # =====================================================================
 # GRAYLOG (Docker stack)
@@ -510,7 +510,6 @@ EOF
   chmod 0640 "${ENV_FILE}"
 fi
 
-# docker-compose.yml
 if [[ ! -s "${GL_DIR}/docker-compose.yml" ]]; then
   cat > "${GL_DIR}/docker-compose.yml" <<'YAML'
 services:
@@ -548,8 +547,8 @@ services:
   graylog:
     image: graylog/graylog:6.0
     depends_on:
-      mongodb:   { condition: service_healthy }
-      opensearch:{ condition: service_healthy }
+      - mongodb
+      - opensearch
     restart: unless-stopped
     environment:
       - GRAYLOG_PASSWORD_SECRET=${GRAYLOG_PASSWORD_SECRET}

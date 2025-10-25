@@ -44,6 +44,9 @@ apt-get install -y --no-install-recommends \
   psmisc nfdump softflowd rrdtool snmp snmpd \
   nmap arp-scan bind9-dnsutils avahi-utils ieee-data \
   cron
+# Dipendenze aggiuntive per NAT/UPnP + MTU/MSS + Traceroute
+apt-get install -y --no-install-recommends \
+  iproute2 iputils-tracepath mtr-tiny miniupnpc iptables
 
 # opzionale: MIBs
 if candidate="$(apt-cache policy snmp-mibs-downloader 2>/dev/null | awk '/Candidate:/ {print $2}')"; then
@@ -324,6 +327,11 @@ Cmnd_Alias NP_SVC = \
   /bin/systemctl restart netprobe-api.service,     /usr/bin/systemctl restart netprobe-api.service
 Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
 Cmnd_Alias NP_NM   = /usr/bin/nmcli *
+# iptables (solo tabella mangle) per MSS clamp da UI
+Cmnd_Alias NP_IPT  = \
+  /usr/sbin/iptables -t mangle -S, \
+  /usr/sbin/iptables -t mangle -A FORWARD -o *, \
+  /usr/sbin/iptables -t mangle -D FORWARD -o *
 # Lettura sicura password DB Cacti dalla UI
 Cmnd_Alias NP_CACTI = /usr/bin/cat /etc/cacti/debian.php, /bin/cat /etc/cacti/debian.php
 # Esecuzione installer da UI (entrambe le posizioni)
@@ -332,7 +340,7 @@ Cmnd_Alias NP_UPDATE = \
   /bin/bash /opt/netprobe/install-testmachine.sh *, \
   /usr/bin/env DEBIAN_FRONTEND=noninteractive /opt/netprobe/install/install-testmachine.sh *, \
   /bin/bash /opt/netprobe/install/install-testmachine.sh *
-netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI, NP_UPDATE
+netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_IPT, NP_CACTI, NP_UPDATE
 EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -cf /etc/sudoers.d/netprobe-ops || { echo "Errore in /etc/sudoers.d/netprobe-ops"; exit 1; }

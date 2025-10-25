@@ -1,9 +1,9 @@
-# routes/natfw.py
+# routes/natfw.py (updated)
 from fastapi import APIRouter, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from html import escape
 from util.shell import run
-import json, re, ipaddress, time
+import json, re, ipaddress, time, shutil
 
 router = APIRouter(prefix="/nat", tags=["nat"])
 
@@ -66,6 +66,76 @@ def _classify(ip:str)->str:
     except Exception:
         return "UNKNOWN"
 
+# --------- MTU/MSS Pathfinder helpers ---------
+
+def _nm_get_mtu(profile:"str"="wan0"):
+    rc, out, _ = run(["sudo","nmcli","-t","-f","connection.id,ipv4.mtu","connection","show",profile])
+    if rc==0 and out:
+        parts = out.strip().split(":")
+        if len(parts)==2 and parts[1].strip().isdigit():
+            return int(parts[1].strip())
+    return None
+
+def _nm_set_mtu(profile:"str", mtu:int)->bool:
+    rc, _, _ = run(["sudo","nmcli","connection","modify",profile,"ipv4.mtu",str(int(mtu))])
+    if rc!=0: return False
+    rc, _, _ = run(["sudo","nmcli","connection","up",profile])
+    return rc==0
+
+TRACEPATH = shutil.which("tracepath")
+PING = shutil.which("ping") or "/bin/ping"
+
+def _tracepath_pmtu(target:str)->int|None:
+    # If tracepath is not installed, skip to fallback
+    if not TRACEPATH:
+        return None
+    rc, out, _ = run([TRACEPATH,"-n","-m","30",target])
+    if rc==0 and out:
+        # look for 'pmtu 1500' (first occurrence wins)
+        for line in out.splitlines():
+            m = re.search(r"pmtu\s+(\d+)", line)
+            if m:
+                try: return int(m.group(1))
+                except: pass
+    return None
+
+# Binary search using ping DF: payload + 28 = MTU
+
+def _ping_df_ok(host:str, payload:int)->bool:
+    rc, out, _ = run([PING,"-c","1","-W","1","-M","do","-s",str(int(payload)),host])
+    if rc!=0: return False
+    if "0 received" in (out or "") or "100% packet loss" in (out or ""): return False
+    if "Frag needed" in (out or "") or "Message too long" in (out or ""): return False
+    return True
+
+
+def _mtu_search_ping(host:str, lo:int=1200, hi:int=1500)->int|None:
+    # Search MTU in [lo, hi]; convert to payload internally
+    best = None
+    L = max(576, lo)
+    H = min(hi, 2000)
+    while L <= H:
+        mid = (L + H)//2
+        payload = mid - 28
+        ok = _ping_df_ok(host, payload)
+        if ok:
+            best = mid
+            L = mid + 1
+        else:
+            H = mid - 1
+    return best
+
+
+def _suggestions(mtu:int|None)->dict:
+    sugg = {}
+    if mtu:
+        # conservative ladder
+        ladder = [1460, 1440, 1432, 1400]
+        # derive MSS ~= MTU-40 (IPv4)
+        mss = max(536, mtu-40)
+        sugg = {"mss": mss, "ladder": ladder, "note": "MSS stimata IPv4 = MTU-40"}
+    return sugg
+
 # ========================================================================
 #                                   UI
 # ========================================================================
@@ -74,10 +144,10 @@ def page(request: Request):
     return HTMLResponse(
         head("NAT & Firewall") +
         """
-<div class='grid'>
+<div class='grid' style="grid-template-columns: repeat(2, minmax(340px, 1fr)); gap: 24px;">
   <div class='card'>
     <h2>NAT &amp; Firewall Visibility</h2>
-    <p class='muted'>Rileva IP WAN vs IP pubblico (CGNAT), prova apertura porta via UPnP e reachability locale.</p>
+    <p class='muted'>Rileva IP WAN vs IP pubblico (CGNAT) e prova apertura porta via UPnP.</p>
 
     <div class='row'>
       <div>
@@ -101,21 +171,48 @@ def page(request: Request):
         <div class='muted tiny'>Richiede un router con UPnP abilitato sul percorso WAN.</div>
       </div>
     </div>
-
-    <hr class='hr-thin'>
-
-    <div>
-      <b>Listener locale (finestra temporale)</b>
-      <div class='row'>
-        <div><label>Porta (>=1024)</label><input id='ls_port' placeholder='55000'/></div>
-        <div><label>Durata (s)</label><input id='ls_sec' placeholder='10' value='10'/></div>
-      </div>
-      <a class='btn' href='#' onclick='runListen();return false;'>Apri finestra di test</a>
-      <div class='muted tiny'>Durante la finestra, prova a collegarti dall’esterno all’IP pubblico:porta per verificare il port-forward/firewall.</div>
-    </div>
   </div>
 
   <div class='card'>
+    <h2>Path MTU / MSS</h2>
+    <div class='row'>
+      <div><label>Target 1</label><input id='mtu_t1' value='1.1.1.1'/></div>
+      <div><label>Target 2</label><input id='mtu_t2' value='8.8.8.8'/></div>
+    </div>
+    <a class='btn' href='#' onclick='runMtuTest();return false;'>Esegui test</a>
+    <div id='mtu_out' class='mono' style='margin-top:8px'></div>
+    <div class='row' style='margin-top:8px'>
+      <div><label>Applica MTU</label><input id='mtu_apply_val' placeholder='es. 1492'/></div>
+      <div>
+        <label>Opzioni</label>
+        <label class='checkbox'><input type='checkbox' id='mss_clamp'/> MSS clamp (TCPMSS)</label>
+      </div>
+    </div>
+    <a class='btn secondary' href='#' onclick='applyMtu();return false;'>Applica</a>
+  </div>
+
+  <!-- Traceroute spostato SOTTO e full-width -->
+  <div class='card' style='grid-column: 1 / -1;'>
+    <h2>Traceroute Visualizer</h2>
+    <div class='row'>
+      <div><label>Destinazione</label><input id='trg' placeholder='8.8.8.8 or example.com'/></div>
+      <div>
+        <label>Protocollo</label>
+        <select id='proto'>
+          <option>ICMP</option>
+          <option>UDP</option>
+          <option>TCP:80</option>
+          <option>TCP:443</option>
+        </select>
+      </div>
+      <div><label>Sonde</label><input id='count' value='10'/></div>
+    </div>
+    <a class='btn' href='#' onclick='runTrace();return false;'>Esegui</a>
+    <div id='trace_out' class='table mono' style='font-size:.95rem;margin-top:8px'></div>
+  </div>
+
+  <!-- RISULTATI FULL-WIDTH -->
+  <div class='card' style='grid-column: 1 / -1;'>
     <h2>Risultati</h2>
     <div id='out' class='table mono' style='font-size:.95rem'></div>
   </div>
@@ -127,7 +224,7 @@ function pill(txt, cls){
 }
 function fmtKV(obj){
   if(!obj) return "";
-  const esc = (s)=> String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const esc = (s)=> String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
   return "<table><tbody>" + Object.entries(obj).map(([k,v])=>{
     if(v && typeof v==='object') v = JSON.stringify(v);
     return "<tr><th style='text-align:left;opacity:.85;padding-right:10px'>"+esc(k)+"</th><td>"+esc(v??'')+"</td></tr>";
@@ -154,9 +251,7 @@ async function runCheck(){
       "<h3>WAN (locale)</h3>"+ fmtKV(wan) +
       "<h3>Pubblico (esterno)</h3>"+ fmtKV(pub) +
       "<h3>Dettagli</h3>"+ fmtKV(nat);
-  }catch(e){
-    out.textContent = "Errore: "+e;
-  }
+  }catch(e){ out.textContent = "Errore: "+e; }
 }
 
 async function runUPnP(){
@@ -169,34 +264,70 @@ async function runUPnP(){
     const r = await fetch('/nat/upnp/open?port='+encodeURIComponent(p)+'&proto='+encodeURIComponent(pr), {method:'POST'});
     const js = await r.json();
     out.innerHTML = "<h3>UPnP</h3>"+fmtKV(js);
-  }catch(e){
-    out.textContent = "Errore: "+e;
-  }
+  }catch(e){ out.textContent = "Errore: "+e; }
 }
 
-async function runListen(){
-  const out = document.getElementById('out');
-  const p   = Number(document.getElementById('ls_port').value || 0);
-  const s   = Number(document.getElementById('ls_sec').value || 10);
-  if(!p || p<1024 || p>65535){ alert('Scegli una porta >=1024'); return; }
-  if(!s || s<2 || s>120){ alert('Durata 2..120 secondi'); return; }
-  out.innerHTML = "Apro listener...";
+async function runMtuTest(){
+  const box = document.getElementById('out');
+  box.innerHTML = '<h3>Path MTU / MSS</h3><div class="muted">Test in corso...</div>';
   try{
-    const r = await fetch('/nat/listen?port='+encodeURIComponent(p)+'&seconds='+encodeURIComponent(s));
+    const t1 = (document.getElementById('mtu_t1').value||'').trim();
+    const t2 = (document.getElementById('mtu_t2').value||'').trim();
+    const body = { targets: [t1||'1.1.1.1', t2||'8.8.8.8'] };
+    const r = await fetch('/nat/mtu/test', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
     const js = await r.json();
-    out.innerHTML = "<h3>Listener</h3>"+fmtKV(js);
-  }catch(e){
-    out.textContent = "Errore: "+e;
-  }
+    if(!js.ok){ box.textContent = 'Errore: '+(js.error||''); return; }
+    let html = '';
+    html += '<div><b>MTU attuale</b>: '+(js.mtu_current ?? 'n/d')+'</div>';
+    html += '<div><b>MTU consigliata</b>: '+(js.mtu_best ?? 'n/d')+' <span class="muted-small">('+js.method+')</span></div>';
+    if(js.suggest && js.suggest.mss){ html += '<div><b>MSS stimata</b>: '+js.suggest.mss+'</div>'; }
+    if(js.results){
+      html += '<h3>Dettagli per target</h3><table><thead><tr><th>Target</th><th>Metodo</th><th>MTU OK</th><th>Note</th></tr></thead><tbody>'+
+        js.results.map(r=>'<tr><td>'+r.target+'</td><td>'+r.method+'</td><td>'+(r.mtu_ok??'')+'</td><td>'+(r.warnings?.join('; ')||'')+'</td></tr>').join('')+
+        '</tbody></table>';
+    }
+    if(js.warnings && js.warnings.length){ html += '<div class="muted">⚠ '+js.warnings.join(' | ')+'</div>'; }
+    box.innerHTML = html;
+    // prefill apply box
+    const ap = document.getElementById('mtu_apply_val');
+    if(ap && js.mtu_best) ap.value = js.mtu_best;
+  }catch(e){ out.textContent = 'Errore: '+e; }
 }
 
-// Prefill porte con la porta della UI (se presente)
+async function applyMtu(){
+  const ap = document.getElementById('mtu_apply_val');
+  const clamp = document.getElementById('mss_clamp').checked;
+  const val = Number(ap.value||0);
+  if(!val || val<576 || val>2000){ alert('MTU non valida (576..2000)'); return; }
+  const box = document.getElementById('mtu_out');
+  box.innerHTML = 'Applicazione in corso...';
+  try{
+    const r = await fetch('/nat/mtu/apply?mtu='+encodeURIComponent(val)+'&mss_clamp='+(clamp?'true':'false'));
+    const js = await r.json();
+    out.innerHTML = '<h3>Applicazione MTU</h3>'+fmtKV(js);
+  }catch(e){ out.textContent = 'Errore: '+e; }
+}
+
+async function runTrace(){
+  const dest = (document.getElementById('trg').value||'8.8.8.8').trim();
+  const protoSel = document.getElementById('proto').value;
+  const count = Number(document.getElementById('count').value||10);
+  const out = document.getElementById('trace_out');
+  out.innerHTML = 'Esecuzione traceroute...';
+  try{
+    const r = await fetch('/nat/trace', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({dest, proto: protoSel, count})});
+    const js = await r.json();
+    if(!js.ok){ out.textContent = 'Errore: '+(js.error||''); return; }
+    let rows = js.hops.map(h=>`<tr><td>${h.hop}</td><td>${h.ip||''}</td><td>${h.loss}%</td><td>${h.snt}</td><td>${h.last}</td><td>${h.avg}</td><td>${h.best}</td><td>${h.wrst}</td><td>${h.stdev}</td></tr>`).join('');
+    out.innerHTML = `<table><thead><tr><th>#</th><th>IP</th><th>Loss</th><th>Snt</th><th>Last</th><th>Avg</th><th>Best</th><th>Wrst</th><th>σ</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }catch(e){ out.textContent = 'Errore: '+e; }
+}
+
+// Prefill porta UPnP con la porta della UI
 document.addEventListener('DOMContentLoaded', ()=>{
   const uiPort = (window.location.port && Number(window.location.port)) || 8080;
   const up = document.getElementById('upnp_port');
-  const lp = document.getElementById('ls_port');
   if(up && !up.value) up.value = uiPort;
-  if(lp && !lp.value) lp.value = uiPort;
 });
 </script>
 
@@ -238,33 +369,128 @@ def upnp_open(port: int = Query(..., ge=1, le=65535), proto: str = Query("TCP"))
     ok = (rc == 0) and (("is redirected" in (out or "")) or ("successfully" in (out or "").lower()))
     return {"ok": bool(ok), "rc": rc, "raw": (out or err or "").strip()}
 
-@router.get("/listen")
-def listen_tmp(port: int = Query(..., ge=1024, le=65535), seconds: int = Query(10, ge=2, le=120)):
-    """
-    Apre un listener TCP locale per 'seconds' secondi senza bloccare la richiesta.
-    Implementazione: timeout + socat in background (detached).
-    """
-    # Comando che si autoconsuma: timeout <s> socat TCP-LISTEN:port,fork,reuseaddr SYSTEM:'echo -ne ...'
-    socat_cmd = (
-        f"/usr/bin/timeout {int(seconds)}s "
-        f"/usr/bin/socat TCP-LISTEN:{int(port)},fork,reuseaddr "
-        r"""SYSTEM:'echo -ne TestMachine\ reachability\ ok'"""
-    )
-    # Esecuzione totalmente dettached
-    # nohup bash -lc '<cmd>' >/dev/null 2>&1 &
-    rc, out, err = run([
-        "/usr/bin/nohup", "/bin/bash", "-lc",
-        socat_cmd + " >/dev/null 2>&1 &"
-    ])
-    # Il nohup ritorna subito; anche se rc!=0, proviamo a dire cosa è successo.
-    until_ts = int(time.time()) + int(seconds)
+# -------- MTU endpoints --------
+@router.post("/mtu/test")
+def mtu_test(payload: dict):
+    targets = [t for t in (payload or {}).get('targets', []) if t]
+    if not targets:
+        targets = ["1.1.1.1","8.8.8.8"]
+    results = []
+    warnings = []
+
+    # Current MTU from NetworkManager profile
+    mtu_cur = _nm_get_mtu("wan0")
+
+    bests = []
+    method = "tracepath+ping"
+    # First try tracepath per target
+    for t in targets:
+        mtu_tp = _tracepath_pmtu(t)
+        if mtu_tp:
+            results.append({"target": t, "method": "tracepath", "mtu_ok": mtu_tp, "success": True, "warnings": []})
+            bests.append(mtu_tp)
+        else:
+            # fallback to ping binary search
+            mtu_pg = _mtu_search_ping(t)
+            if mtu_pg:
+                results.append({"target": t, "method": "ping DF", "mtu_ok": mtu_pg, "success": True, "warnings": []})
+                bests.append(mtu_pg)
+            else:
+                results.append({"target": t, "method": "tracepath/ping", "mtu_ok": None, "success": False, "warnings": ["Target non raggiungibile o ICMP filtrato"]})
+                warnings.append(f"Nessun responso affidabile da {t}")
+
+    mtu_best = min(bests) if bests else None
+    suggest = _suggestions(mtu_best)
+
     return {
-        "ok": True if rc==0 else False,
-        "rc": rc,
-        "port": int(port),
-        "proto": "TCP",
-        "window_s": int(seconds),
-        "until_epoch": until_ts,
-        "exec": socat_cmd,
-        "note": "Il listener si chiude automaticamente allo scadere della finestra."
+        "ok": True,
+        "mtu_current": mtu_cur,
+        "mtu_best": mtu_best,
+        "method": method,
+        "results": results,
+        "suggest": suggest,
+        "warnings": warnings,
     }
+
+@router.get("/mtu/apply")
+def mtu_apply(mtu: int = Query(..., ge=576, le=2000), mss_clamp: bool = Query(False)):
+    rget = _ip_route_get()
+    ifname = rget.get("dev") or "wan0"
+
+    prev = _nm_get_mtu("wan0")
+    ok = _nm_set_mtu("wan0", mtu)
+    if not ok:
+        return {"ok": False, "error": "Impossibile applicare MTU via nmcli"}
+
+    # sanity check: quick ping 1.1.1.1
+    rc, _, _ = run(["/bin/ping","-c","1","-W","1","1.1.1.1"]) 
+    if rc != 0:
+        # rollback
+        if prev is not None:
+            _nm_set_mtu("wan0", prev)
+        return {"ok": False, "error": "Sanity check fallito; rollback MTU", "restored": prev}
+
+    res = {"ok": True, "applied_mtu": mtu}
+
+    if mss_clamp:
+        # try iptables mangle TCPMSS clamp-to-pmtu
+        # check existence (by comment)
+        comment = "TM_MSS_CLAMP"
+        rc, out, _ = run(["sudo","iptables","-t","mangle","-S"])
+        exists = (rc==0 and comment in (out or ""))
+        if not exists:
+            rc, _, err = run(["sudo","iptables","-t","mangle","-A","FORWARD","-o",ifname,
+                              "-p","tcp","--tcp-flags","SYN,RST","SYN","-j","TCPMSS","--clamp-mss-to-pmtu","-m","comment","--comment",comment])
+            res["mss_clamp"] = (rc==0)
+            if rc!=0:
+                res["mss_error"] = err or "iptables non disponibile o permessi insufficienti"
+        else:
+            res["mss_clamp"] = True
+            res["mss_note"] = "Regola già presente"
+    return res
+
+# -------- Traceroute Visualizer --------
+@router.post("/trace")
+def trace(payload: dict):
+    dest = (payload or {}).get('dest')
+    proto = (payload or {}).get('proto','ICMP')
+    count = int((payload or {}).get('count',10))
+    if not dest:
+        return {"ok": False, "error": "Destinazione mancante"}
+
+    # map proto -> mtr args
+    proto = str(proto).upper()
+    port = None
+    if proto.startswith('TCP:'):
+        port = proto.split(':',1)[1]
+        base = ["/usr/bin/mtr","-n","-r","-c",str(count),"-T","-P",str(port)]
+    elif proto == 'UDP':
+        base = ["/usr/bin/mtr","-n","-r","-c",str(count),"-u"]
+    else:
+        base = ["/usr/bin/mtr","-n","-r","-c",str(count)]  # ICMP default
+
+    rc, out, err = run(base + [dest])
+    if rc != 0:
+        return {"ok": False, "error": (err or out or "mtr errore")}
+
+    # Parse classic mtr report
+    hops = []
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("Start:") or line.startswith("HOST:") or line.startswith("PACKETS"):
+            continue
+        # Format example: " 1. 10.0.0.1 0.0% 10 0.4 0.5 0.3 0.7 0.1"
+        m = re.match(r"^\s*(\d+)\.\s+([0-9a-fA-F:\.\-]+)\s+(\d+\.\d+)%\s+(\d+)\s+([0-9\.]+)\s+([0-9\.]+)\s+([0-9\.]+)\s+([0-9\.]+)\s+([0-9\.]+)", line)
+        if m:
+            hops.append({
+                "hop": int(m.group(1)),
+                "ip": m.group(2),
+                "loss": float(m.group(3)),
+                "snt": int(m.group(4)),
+                "last": float(m.group(5)),
+                "avg": float(m.group(6)),
+                "best": float(m.group(7)),
+                "wrst": float(m.group(8)),
+                "stdev": float(m.group(9)),
+            })
+    return {"ok": True, "hops": hops}

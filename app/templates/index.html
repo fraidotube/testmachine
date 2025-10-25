@@ -88,6 +88,7 @@
        <img src="/static/img/logo.svg" alt="Logo" class="logo">
      </div>
      <div class="title-center">TestMachine</div>
+     
 
       <div class="spacer">
           {% if user %}
@@ -252,6 +253,18 @@
         <p class="muted">Configura IP sulla LAN usata per le diagnosi.</p>
         <a class="btn" href="/lan">Apri LAN</a>
       </div>
+      
+      <div class="card card--settings">
+        <h2>Sistema</h2>
+        <p class="muted">Porta web, NTP, Cacti Password, Aggiornamenti.</p>
+        <a class="btn" href="/settings">Apri Sistema</a>
+      </div>
+      
+      <div class="card card--settings">
+        <h2>Utenti &amp; accesso</h2>
+        <p class="muted">Gestisci utenti, ruoli e password.</p>
+        <a class="btn" href="/auth/users">Apri gestione utenti</a>
+      </div>
 
       <div class="card card--settings">
         <h2>SmokePing Admin</h2>
@@ -259,17 +272,7 @@
         <a class="btn" href="/sp-admin">Apri SP&nbsp;Admin</a>
       </div>
 
-      <div class="card card--settings">
-        <h2>Impostazioni Aggiuntive</h2>
-        <p class="muted">Cambia la porta web (default 8080), NTP, Cacti Password e altre preferenze.</p>
-        <a class="btn" href="/settings">Apri Impostazioni Aggiuntive</a>
-      </div>
-
-      <div class="card card--settings">
-        <h2>Utenti &amp; accesso</h2>
-        <p class="muted">Gestisci utenti, ruoli e password.</p>
-        <a class="btn" href="/auth/users">Apri gestione utenti</a>
-      </div>
+          
 
       <div class="card card--settings">
         <h2>Impostazioni Capture</h2>
@@ -299,6 +302,14 @@
       </div>
     </div>
     
+    <hr>
+<div class="bgpicker">
+  <label for="bgSelect" class="muted-small">Sfondo</label>
+  <select id="bgSelect" class="bgsel" title="Sfondo"></select>
+</div>
+    
+
+
 
     <div class="footer">© TestMachine – Debian 12.6 - Author: Fraidotube</div>
   </div>
@@ -421,5 +432,94 @@
     refreshStatus();
     setInterval(refreshStatus, 5000);
   </script>
+  
+  <script>
+  // Applica immagine o tinta unita
+  function setBg(choice){
+    // proprietà comuni
+    document.body.style.backgroundRepeat     = "no-repeat, no-repeat";
+    document.body.style.backgroundPosition   = "center, center";
+    document.body.style.backgroundSize       = "100% 100%, cover";
+    document.body.style.backgroundAttachment = "fixed, fixed";
+
+    if (choice && choice.startsWith("solid:")){
+      const color = choice.slice(6); // es. "#0b1226"
+      // velo scuro sopra il colore piatto
+      document.body.style.backgroundImage = `linear-gradient(rgba(0,0,0,.35), rgba(0,0,0,.35))`;
+      document.body.style.backgroundColor = color;
+    } else {
+      // immagine (fallback se assente)
+      const url = choice || "/static/img/sfondo.png";
+      document.body.style.backgroundColor = ""; // reset
+      document.body.style.backgroundImage =
+        `linear-gradient(rgba(0,0,0,.35), rgba(0,0,0,.35)), url("${url}")`;
+    }
+  }
+
+  async function initBgSelector(){
+    const sel = document.getElementById('bgSelect');
+    const fallback = "/static/img/sfondo.png";
+
+    // preset tinte unite
+    const solids = [
+      { value: "solid:#0b1226", label: "Blu scuro" },
+      { value: "solid:#111827", label: "Grafite"   },
+      { value: "solid:#0f172a", label: "Slate"     },
+      { value: "solid:#0a0a0a", label: "Nero"      },
+    ];
+
+    try{
+      const r  = await fetch('/bg/list');
+      const js = await r.json();
+
+      const files = Array.isArray(js.files) ? js.files : [];
+      const current = js.current || files[0] || fallback;
+
+      // Opzioni immagini numerate (1..n)
+      const optsImgs = files.map((f,i)=>
+        `<option value="${f}" ${f===current?'selected':''}>${i+1}</option>`
+      ).join('');
+
+      // Opzioni tinte unite (etichette descrittive)
+      const optsSolids =
+        `<optgroup label="Tinta unita">` +
+        solids.map(s =>
+          `<option value="${s.value}" ${s.value===current?'selected':''}>${s.label}</option>`
+        ).join('') +
+        `</optgroup>`;
+
+      sel.innerHTML = optsImgs + optsSolids;
+
+      // Applica subito lo sfondo correntemente salvato
+      if(current.startsWith("solid:")){
+        setBg(current);
+      }else{
+        const img = new Image();
+        img.onload  = ()=> setBg(current);
+        img.onerror = ()=> setBg(fallback);
+        img.src = current;
+      }
+
+      sel.addEventListener('change', async ()=>{
+        const val = sel.value;
+        setBg(val); // applica immediato
+        try{
+          await fetch('/bg/set', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({file: val})
+          });
+        }catch(_){}
+      });
+    }catch(_){
+      setBg(fallback);
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', initBgSelector);
+</script>
+
+
+
 </body>
 </html>

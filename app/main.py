@@ -17,6 +17,7 @@ from routes.flow import router as flow_router
 from routes.logs import router as logs_router
 from routes.shell import router as shell_router
 from routes.alerts import router as alerts_router
+from routes import bg
 
 
 
@@ -115,6 +116,7 @@ app.include_router(flow_router)
 app.include_router(logs_router)
 app.include_router(shell_router) 
 app.include_router(alerts_router)
+app.include_router(bg.router)
 
 # ---- NUOVO: endpoint per leggere la password DB di Cacti (solo admin via RBAC) ----
 import re

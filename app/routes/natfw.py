@@ -3,7 +3,7 @@ from fastapi import APIRouter, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from html import escape
 from util.shell import run
-import json, re, ipaddress, time, shutil
+import json, re, ipaddress, shutil
 
 router = APIRouter(prefix="/nat", tags=["nat"])
 
@@ -67,7 +67,6 @@ def _classify(ip:str)->str:
         return "UNKNOWN"
 
 # --------- MTU/MSS Pathfinder helpers ---------
-
 def _nm_get_mtu(profile:"str"="wan0"):
     rc, out, _ = run(["sudo","nmcli","-t","-f","connection.id,ipv4.mtu","connection","show",profile])
     if rc==0 and out:
@@ -86,21 +85,20 @@ TRACEPATH = shutil.which("tracepath")
 PING = shutil.which("ping") or "/bin/ping"
 
 def _tracepath_pmtu(target:str)->int|None:
-    # If tracepath is not installed, skip to fallback
     if not TRACEPATH:
         return None
     rc, out, _ = run([TRACEPATH,"-n","-m","30",target])
     if rc==0 and out:
-        # look for 'pmtu 1500' (first occurrence wins)
         for line in out.splitlines():
             m = re.search(r"pmtu\s+(\d+)", line)
             if m:
-                try: return int(m.group(1))
-                except: pass
+                try:
+                    return int(m.group(1))
+                except:
+                    pass
     return None
 
 # Binary search using ping DF: payload + 28 = MTU
-
 def _ping_df_ok(host:str, payload:int)->bool:
     rc, out, _ = run([PING,"-c","1","-W","1","-M","do","-s",str(int(payload)),host])
     if rc!=0: return False
@@ -108,9 +106,7 @@ def _ping_df_ok(host:str, payload:int)->bool:
     if "Frag needed" in (out or "") or "Message too long" in (out or ""): return False
     return True
 
-
 def _mtu_search_ping(host:str, lo:int=1200, hi:int=1500)->int|None:
-    # Search MTU in [lo, hi]; convert to payload internally
     best = None
     L = max(576, lo)
     H = min(hi, 2000)
@@ -125,13 +121,10 @@ def _mtu_search_ping(host:str, lo:int=1200, hi:int=1500)->int|None:
             H = mid - 1
     return best
 
-
 def _suggestions(mtu:int|None)->dict:
     sugg = {}
     if mtu:
-        # conservative ladder
         ladder = [1460, 1440, 1432, 1400]
-        # derive MSS ~= MTU-40 (IPv4)
         mss = max(536, mtu-40)
         sugg = {"mss": mss, "ladder": ladder, "note": "MSS stimata IPv4 = MTU-40"}
     return sugg
@@ -191,7 +184,7 @@ def page(request: Request):
     <a class='btn secondary' href='#' onclick='applyMtu();return false;'>Applica</a>
   </div>
 
-  <!-- Traceroute spostato SOTTO e full-width -->
+  <!-- Traceroute full width -->
   <div class='card' style='grid-column: 1 / -1;'>
     <h2>Traceroute Visualizer</h2>
     <div class='row'>
@@ -211,7 +204,6 @@ def page(request: Request):
     <div id='trace_out' class='table mono' style='font-size:.95rem;margin-top:8px'></div>
   </div>
 
-  <!-- RISULTATI FULL-WIDTH -->
   <div class='card' style='grid-column: 1 / -1;'>
     <h2>Risultati</h2>
     <div id='out' class='table mono' style='font-size:.95rem'></div>
@@ -268,8 +260,8 @@ async function runUPnP(){
 }
 
 async function runMtuTest(){
-  const box = document.getElementById('out');
-  box.innerHTML = '<h3>Path MTU / MSS</h3><div class="muted">Test in corso...</div>';
+  const box = document.getElementById('mtu_out');
+  box.innerHTML = 'Test MTU in corso...';
   try{
     const t1 = (document.getElementById('mtu_t1').value||'').trim();
     const t2 = (document.getElementById('mtu_t2').value||'').trim();
@@ -288,10 +280,9 @@ async function runMtuTest(){
     }
     if(js.warnings && js.warnings.length){ html += '<div class="muted">⚠ '+js.warnings.join(' | ')+'</div>'; }
     box.innerHTML = html;
-    // prefill apply box
     const ap = document.getElementById('mtu_apply_val');
     if(ap && js.mtu_best) ap.value = js.mtu_best;
-  }catch(e){ out.textContent = 'Errore: '+e; }
+  }catch(e){ box.textContent = 'Errore: '+e; }
 }
 
 async function applyMtu(){
@@ -304,8 +295,8 @@ async function applyMtu(){
   try{
     const r = await fetch('/nat/mtu/apply?mtu='+encodeURIComponent(val)+'&mss_clamp='+(clamp?'true':'false'));
     const js = await r.json();
-    out.innerHTML = '<h3>Applicazione MTU</h3>'+fmtKV(js);
-  }catch(e){ out.textContent = 'Errore: '+e; }
+    box.innerHTML = '<h3>Applicazione</h3>'+fmtKV(js);
+  }catch(e){ box.textContent = 'Errore: '+e; }
 }
 
 async function runTrace(){
@@ -318,7 +309,13 @@ async function runTrace(){
     const r = await fetch('/nat/trace', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({dest, proto: protoSel, count})});
     const js = await r.json();
     if(!js.ok){ out.textContent = 'Errore: '+(js.error||''); return; }
-    let rows = js.hops.map(h=>`<tr><td>${h.hop}</td><td>${h.ip||''}</td><td>${h.loss}%</td><td>${h.snt}</td><td>${h.last}</td><td>${h.avg}</td><td>${h.best}</td><td>${h.wrst}</td><td>${h.stdev}</td></tr>`).join('');
+    const hops = Array.isArray(js.hops) ? js.hops : [];
+    if (!hops.length) {
+      let raw = js.raw ? `<pre style="white-space:pre-wrap">${js.raw}</pre>` : '';
+      out.innerHTML = `<div class="muted">Nessun dato dal traceroute (possibile filtro ICMP o parse vuoto).</div>${raw}`;
+      return;
+    }
+    let rows = hops.map(h=>`<tr><td>${h.hop}</td><td>${h.ip||''}</td><td>${h.loss}%</td><td>${h.snt}</td><td>${h.last}</td><td>${h.avg}</td><td>${h.best}</td><td>${h.wrst}</td><td>${h.stdev}</td></tr>`).join('');
     out.innerHTML = `<table><thead><tr><th>#</th><th>IP</th><th>Loss</th><th>Snt</th><th>Last</th><th>Avg</th><th>Best</th><th>Wrst</th><th>σ</th></tr></thead><tbody>${rows}</tbody></table>`;
   }catch(e){ out.textContent = 'Errore: '+e; }
 }
@@ -378,19 +375,16 @@ def mtu_test(payload: dict):
     results = []
     warnings = []
 
-    # Current MTU from NetworkManager profile
     mtu_cur = _nm_get_mtu("wan0")
 
     bests = []
     method = "tracepath+ping"
-    # First try tracepath per target
     for t in targets:
         mtu_tp = _tracepath_pmtu(t)
         if mtu_tp:
             results.append({"target": t, "method": "tracepath", "mtu_ok": mtu_tp, "success": True, "warnings": []})
             bests.append(mtu_tp)
         else:
-            # fallback to ping binary search
             mtu_pg = _mtu_search_ping(t)
             if mtu_pg:
                 results.append({"target": t, "method": "ping DF", "mtu_ok": mtu_pg, "success": True, "warnings": []})
@@ -422,10 +416,8 @@ def mtu_apply(mtu: int = Query(..., ge=576, le=2000), mss_clamp: bool = Query(Fa
     if not ok:
         return {"ok": False, "error": "Impossibile applicare MTU via nmcli"}
 
-    # sanity check: quick ping 1.1.1.1
-    rc, _, _ = run(["/bin/ping","-c","1","-W","1","1.1.1.1"]) 
+    rc, _, _ = run(["/bin/ping","-c","1","-W","1","1.1.1.1"])
     if rc != 0:
-        # rollback
         if prev is not None:
             _nm_set_mtu("wan0", prev)
         return {"ok": False, "error": "Sanity check fallito; rollback MTU", "restored": prev}
@@ -433,8 +425,6 @@ def mtu_apply(mtu: int = Query(..., ge=576, le=2000), mss_clamp: bool = Query(Fa
     res = {"ok": True, "applied_mtu": mtu}
 
     if mss_clamp:
-        # try iptables mangle TCPMSS clamp-to-pmtu
-        # check existence (by comment)
         comment = "TM_MSS_CLAMP"
         rc, out, _ = run(["sudo","iptables","-t","mangle","-S"])
         exists = (rc==0 and comment in (out or ""))
@@ -458,16 +448,14 @@ def trace(payload: dict):
     if not dest:
         return {"ok": False, "error": "Destinazione mancante"}
 
-    # map proto -> mtr args
     proto = str(proto).upper()
-    port = None
     if proto.startswith('TCP:'):
         port = proto.split(':',1)[1]
         base = ["/usr/bin/mtr","-n","-r","-c",str(count),"-T","-P",str(port)]
     elif proto == 'UDP':
         base = ["/usr/bin/mtr","-n","-r","-c",str(count),"-u"]
     else:
-        base = ["/usr/bin/mtr","-n","-r","-c",str(count)]  # ICMP default
+        base = ["/usr/bin/mtr","-n","-r","-c",str(count)]
 
     rc, out, err = run(base + [dest])
     if rc != 0:
@@ -475,22 +463,36 @@ def trace(payload: dict):
 
     # Parse classic mtr report
     hops = []
+    # Regex 1: formato con "|--" (il tuo caso)
+    re_pipe = re.compile(
+        r"^\s*(\d+)\.\s*\|\-\-\s*(\S+)\s+(\d+(?:\.\d+)?)%\s+(\d+)\s+"
+        r"([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)"
+    )
+    # Regex 2: fallback senza "|--"
+    re_plain = re.compile(
+        r"^\s*(\d+)\.\s+(\S+)\s+(\d+(?:\.\d+)?)%\s+(\d+)\s+"
+        r"([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)"
+    )
+
     for line in (out or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("Start:") or line.startswith("HOST:") or line.startswith("PACKETS"):
+        s = line.strip()
+        if not s or s.startswith(("Start:", "HOST:", "PACKETS", "Loss%")):
             continue
-        # Format example: " 1. 10.0.0.1 0.0% 10 0.4 0.5 0.3 0.7 0.1"
-        m = re.match(r"^\s*(\d+)\.\s+([0-9a-fA-F:\.\-]+)\s+(\d+\.\d+)%\s+(\d+)\s+([0-9\.]+)\s+([0-9\.]+)\s+([0-9\.]+)\s+([0-9\.]+)\s+([0-9\.]+)", line)
+        m = re_pipe.match(s) or re_plain.match(s)
         if m:
             hops.append({
-                "hop": int(m.group(1)),
-                "ip": m.group(2),
+                "hop":  int(m.group(1)),
+                "ip":   m.group(2),
                 "loss": float(m.group(3)),
-                "snt": int(m.group(4)),
+                "snt":  int(m.group(4)),
                 "last": float(m.group(5)),
-                "avg": float(m.group(6)),
+                "avg":  float(m.group(6)),
                 "best": float(m.group(7)),
                 "wrst": float(m.group(8)),
-                "stdev": float(m.group(9)),
+                "stdev":float(m.group(9)),
             })
+
+    # Se vuoto, ritorna anche l'output raw per debug UI
+    if not hops:
+        return {"ok": True, "hops": [], "raw": out}
     return {"ok": True, "hops": hops}

@@ -4,7 +4,6 @@ set -Eeuo pipefail
 LOG=/var/log/testmachine-install.log
 exec > >(tee -a "$LOG") 2>&1
 exec 2>&1
-
 step(){ echo -e "\n== $* =="; }
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Lancia come root"; exit 1; }
@@ -12,8 +11,8 @@ step(){ echo -e "\n== $* =="; }
 APP_DIR=/opt/netprobe
 APP_USER=netprobe
 APP_GROUP=netprobe
-API_PORT=9000                    # API (socket activation) 127.0.0.1:9000
-WEB_PORT=${WEB_PORT:-8080}       # Apache listener esterno
+API_PORT=9000                      # API (socket activation) 127.0.0.1:9000
+WEB_PORT=${WEB_PORT:-8080}         # Apache listener esterno
 
 # =====================================================================
 # APT / SISTEMA
@@ -44,7 +43,7 @@ apt-get install -y --no-install-recommends \
   psmisc nfdump softflowd rrdtool snmp snmpd \
   nmap arp-scan bind9-dnsutils avahi-utils ieee-data \
   cron
-# Dipendenze aggiuntive per NAT/UPnP + MTU/MSS + Traceroute
+# Dipendenze extra per NAT/UPnP + MTU/MSS + traceroute
 apt-get install -y --no-install-recommends \
   iproute2 iputils-tracepath mtr-tiny miniupnpc iptables
 
@@ -62,24 +61,21 @@ if [[ -f "$SNMPCFG" ]]; then
 fi
 
 # ---------------------------------------------------------------------
-# Docker (repo ufficiale) + compose v2
+# Docker CE (repo ufficiale) + compose v2 wrapper
 # ---------------------------------------------------------------------
 step "Docker CE + compose (repo ufficiale)"
-apt-get install -y --no-install-recommends ca-certificates curl gnupg
 install -m 0755 -d /etc/apt/keyrings
 if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
   curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
 fi
 arch="$(dpkg --print-architecture)"
-codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-bookworm}")"
-echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${codename} stable" > /etc/apt/sources.list.d/docker.list
+echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${CODENAME} stable" > /etc/apt/sources.list.d/docker.list
 apt-get update
-apt-get install -y --no-install-recommends \
-  docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
 
-# Wrapper dcompose: usa 'docker compose' o 'docker-compose' legacy
+# wrapper: usa 'docker compose' o 'docker-compose' se presente
 cat >/usr/local/bin/dcompose <<'EOF'
 #!/usr/bin/env bash
 set -e
@@ -99,7 +95,7 @@ chmod +x /usr/local/bin/dcompose
 # =====================================================================
 step "Creo utente/gruppo ${APP_USER}"
 getent group  "${APP_GROUP}" >/dev/null || groupadd -r "${APP_GROUP}"
-id -u "${APP_USER}" >/devnull 2>&1 || useradd -r -g "${APP_GROUP}" -d "${APP_DIR}" -s /usr/sbin/nologin "${APP_USER}"
+id -u "${APP_USER}" >/dev/null 2>&1 || useradd -r -g "${APP_GROUP}" -d "${APP_DIR}" -s /usr/sbin/nologin "${APP_USER}"
 
 step "Sorgenti app in ${APP_DIR}"
 install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" "${APP_DIR}"
@@ -208,7 +204,6 @@ EOF
 [Unit]
 Description=TestMachine Alerts sweep
 After=network-online.target
-
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/netprobe/app
@@ -217,17 +212,14 @@ User=netprobe
 Group=netprobe
 ExecStart=/opt/netprobe/venv/bin/python /opt/netprobe/app/jobs/alertd.py
 EOF
-
   cat > /etc/systemd/system/netprobe-alertd.timer <<'EOF'
 [Unit]
 Description=Run TestMachine Alerts sweep every minute
-
 [Timer]
 OnBootSec=45s
 OnUnitActiveSec=60s
 AccuracySec=1s
 Unit=netprobe-alertd.service
-
 [Install]
 WantedBy=timers.target
 EOF
@@ -238,7 +230,6 @@ EOF
 [Unit]
 Description=TestMachine Speedtest sweep
 After=network-online.target
-
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/netprobe/app
@@ -247,17 +238,14 @@ User=netprobe
 Group=netprobe
 ExecStart=/opt/netprobe/venv/bin/python /opt/netprobe/app/jobs/speedtestd.py
 EOF
-
   cat > /etc/systemd/system/netprobe-speedtestd.timer <<'EOF'
 [Unit]
 Description=Run TestMachine Speedtest sweep every minute
-
 [Timer]
 OnBootSec=45s
 OnUnitActiveSec=60s
 AccuracySec=1s
 Unit=netprobe-speedtestd.service
-
 [Install]
 WantedBy=timers.target
 EOF
@@ -276,8 +264,6 @@ EOF
   for link in /etc/systemd/system/multi-user.target.wants/netprobe-flow-exporter@*.service; do
     [[ -L "$link" ]] && systemctl disable "$(basename "$link")" || true
   done
-
-  # abilita i timer alert/speedtest
   systemctl enable --now netprobe-alertd.timer
   systemctl enable --now netprobe-speedtestd.timer
 }
@@ -296,13 +282,13 @@ step "Site testmachine.conf (API/WS + Graylog + esclusioni /smokeping /cgi-bin /
 cat >/etc/apache2/sites-available/testmachine.conf <<EOF
 <VirtualHost *:${WEB_PORT}>
   ServerName testmachine
-
   ErrorLog  /var/log/apache2/testmachine-error.log
   CustomLog /var/log/apache2/testmachine-access.log combined
 
   ProxyPreserveHost On
   ProxyRequests Off
   RequestHeader set X-Forwarded-Proto "http"
+  ProxyTimeout 120
 
   # WebSocket verso l'app FastAPI
   ProxyPass        /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
@@ -367,14 +353,11 @@ Cmnd_Alias NP_SVC = \
   /bin/systemctl restart netprobe-api.service,     /usr/bin/systemctl restart netprobe-api.service
 Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
 Cmnd_Alias NP_NM   = /usr/bin/nmcli *
-# iptables (solo tabella mangle) per MSS clamp da UI
 Cmnd_Alias NP_IPT  = \
   /usr/sbin/iptables -t mangle -S, \
   /usr/sbin/iptables -t mangle -A FORWARD -o *, \
   /usr/sbin/iptables -t mangle -D FORWARD -o *
-# Lettura sicura password DB Cacti dalla UI
 Cmnd_Alias NP_CACTI = /usr/bin/cat /etc/cacti/debian.php, /bin/cat /etc/cacti/debian.php
-# Esecuzione installer da UI (entrambe le posizioni)
 Cmnd_Alias NP_UPDATE = \
   /usr/bin/env DEBIAN_FRONTEND=noninteractive /opt/netprobe/install-testmachine.sh *, \
   /bin/bash /opt/netprobe/install-testmachine.sh *, \
@@ -385,7 +368,7 @@ EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -cf /etc/sudoers.d/netprobe-ops || { echo "Errore in /etc/sudoers.d/netprobe-ops"; exit 1; }
 
-# Packet capture / net mapper caps
+# Capability strumenti non-root
 step "Capability: dumpcap/arp-scan/nmap non-root"
 setcap cap_net_raw,cap_net_admin+eip /usr/bin/dumpcap || true
 getcap /usr/bin/dumpcap || true
@@ -396,16 +379,14 @@ setcap cap_net_raw,cap_net_admin+eip /usr/bin/nmap || true
 # Gruppi utili
 usermod -aG "${APP_GROUP}" smokeping || true
 usermod -aG "${APP_GROUP}" www-data  || true
-usermod -aG www-data "${APP_USER}"    || true   # per cacti/debian.php (640 root:www-data)
+usermod -aG www-data "${APP_USER}"    || true
 
 # =====================================================================
-# PHP + CACTI + SPINE (dbconfig-common = TRUE)
+# PHP + CACTI + SPINE
 # =====================================================================
 step "PHP (FPM) + moduli Required per Cacti"
-apt-get install -y \
-  php php-fpm php-mysql php-xml php-gd php-mbstring php-snmp php-gmp php-intl php-ldap php-curl
+apt-get install -y php php-fpm php-mysql php-xml php-gd php-mbstring php-snmp php-gmp php-intl php-ldap php-curl
 
-# PHP tuning base per Cacti
 PHPVER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
 tee /etc/php/${PHPVER}/apache2/conf.d/90-cacti.ini >/dev/null <<'EOF'
 memory_limit = 512M
@@ -428,13 +409,11 @@ echo "cacti cacti/dbconfig-install boolean true" | debconf-set-selections
 apt-get install -y mariadb-server cacti cacti-spine
 systemctl enable --now mariadb
 
-# Cartelle base utili (incluso log per cron)
 install -d -m 0775 -o www-data -g www-data /usr/share/cacti/site/log || true
 install -d -m 0775 -o www-data -g www-data /var/lib/cacti/rra       || true
 install -d -m 0775 -o www-data -g www-data /var/lib/cacti/csrf       || true
 install -d -m 0775 -o www-data -g www-data /var/log/cacti            || true
 
-# Spine: allinea credenziali con /etc/cacti/debian.php
 step "Spine: allineo /etc/cacti/spine.conf a /etc/cacti/debian.php"
 if [[ -f /etc/cacti/spine.conf ]] && [[ -f /etc/cacti/debian.php ]]; then
   php -r 'include "/etc/cacti/debian.php"; printf("%s|%s|%s|%s|%s\n",$database_hostname,$database_username,$database_password,$database_default,$database_port);' >/tmp/.cactidb || true
@@ -452,7 +431,6 @@ if [[ -f /etc/cacti/spine.conf ]] && [[ -f /etc/cacti/debian.php ]]; then
   fi
 fi
 
-# Fallback schema: se DB cacti vuoto, importa dallo schema del pacchetto
 step "Verifica schema Cacti e fallback import se necessario"
 CNT=$(mysql -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='cacti';" || echo 0)
 if [[ "${CNT:-0}" -eq 0 ]]; then
@@ -473,10 +451,10 @@ systemctl enable --now cron
 if [[ -f /etc/cron.d/cacti ]] && grep -q 'poller\.php' /etc/cron.d/cacti; then
   echo "Job cron Cacti presente in /etc/cron.d/cacti"
 else
-  echo "ATTENZIONE: /etc/cron.d/cacti mancante o senza poller.php (il pacchetto dovrebbe fornirlo)."
+  echo "ATTENZIONE: /etc/cron.d/cacti mancante o senza poller.php."
 fi
 
-# (opzionale) prima esecuzione del poller (flag corretto)
+# prima esecuzione (opzionale) – corretto: --force
 sudo -u www-data -- php /usr/share/cacti/site/poller.php --force || true
 
 # =====================================================================
@@ -487,16 +465,16 @@ step "Graylog stack (docker compose)"
 GL_DIR=/opt/netprobe/graylog
 install -d -m 0755 -o ${APP_USER} -g ${APP_GROUP} "${GL_DIR}"
 
-# Rileva IP locale per HTTP_EXTERNAL_URI
+# IP per HTTP_EXTERNAL_URI
 SELF_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
 SELF_IP="${SELF_IP:-127.0.0.1}"
 
-# Genera segreti/password (default admin/admin)
+# segreti/password (default admin/admin)
 GL_SECRET="$(openssl rand -hex 64)"
 GL_SHA="$(printf %s 'admin' | sha256sum | awk '{print $1}')"
 GL_EXT_URI="http://${SELF_IP}:${WEB_PORT}/graylog/"
 
-# .env (idempotente: se esiste conserva SECRET e SHA, aggiorna solo l'URL)
+# .env (idempotente)
 ENV_FILE="${GL_DIR}/.env"
 if [[ -f "${ENV_FILE}" ]]; then
   sed -i "s|^GRAYLOG_HTTP_EXTERNAL_URI=.*|GRAYLOG_HTTP_EXTERNAL_URI=${GL_EXT_URI}|" "${ENV_FILE}"
@@ -510,11 +488,9 @@ EOF
   chmod 0640 "${ENV_FILE}"
 fi
 
-# Sempre backup + sovrascrittura del compose (evita vecchie 'condition:' che rompono dcompose)
-if [[ -s "${GL_DIR}/docker-compose.yml" ]]; then
-  cp -a "${GL_DIR}/docker-compose.yml" "${GL_DIR}/docker-compose.yml.bak.$(date +%F_%H%M%S)" || true
-fi
-cat > "${GL_DIR}/docker-compose.yml" <<'YAML'
+# docker-compose.yml
+if [[ ! -s "${GL_DIR}/docker-compose.yml" ]]; then
+  cat > "${GL_DIR}/docker-compose.yml" <<'YAML'
 services:
   mongodb:
     image: mongo:6
@@ -533,7 +509,7 @@ services:
     environment:
       discovery.type: single-node
       plugins.security.disabled: "true"
-      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
     ulimits:
       memlock: { soft: -1, hard: -1 }
       nofile:  { soft: 65536, hard: 65536 }
@@ -550,43 +526,29 @@ services:
   graylog:
     image: graylog/graylog:6.0
     restart: unless-stopped
-    depends_on:
-      - mongodb
-      - opensearch
-
-    # UI solo in localhost: Apache fa da reverse proxy su /graylog/
+    depends_on: [mongodb, opensearch]
     ports:
       - "127.0.0.1:9001:9000"
-      # Input syslog opzionali:
       - "0.0.0.0:5514:1514/tcp"
       - "0.0.0.0:5514:1514/udp"
-
     environment:
-      - TZ=CEST
-      - GRAYLOG_PASSWORD_SECRET=${GRAYLOG_PASSWORD_SECRET}
-      - GRAYLOG_ROOT_PASSWORD_SHA2=${GRAYLOG_ROOT_PASSWORD_SHA2}
-      - GRAYLOG_ROOT_USERNAME=admin
-
-      # Bind interno + URL esterno dietro Apache
-      - GRAYLOG_HTTP_BIND_ADDRESS=0.0.0.0:9000
-      - GRAYLOG_HTTP_EXTERNAL_URI=${GRAYLOG_HTTP_EXTERNAL_URI}
-
-      # Collegamenti espliciti a backend
-      - GRAYLOG_OPENSEARCH_HOSTS=http://opensearch:9200
-      - GRAYLOG_ELASTICSEARCH_HOSTS=http://opensearch:9200
-      - GRAYLOG_MONGODB_URI=mongodb://mongodb:27017/graylog
-
-      # extra
-      - GRAYLOG_HTTP_ENABLE_CORS=true
-      - GRAYLOG_HTTP_ENABLE_GZIP=true
-
-    # health morbido: durante il bootstrap l'API potrebbe non rispondere
+      TZ: "Europe/Rome"
+      GRAYLOG_PASSWORD_SECRET: "${GRAYLOG_PASSWORD_SECRET}"
+      GRAYLOG_ROOT_PASSWORD_SHA2: "${GRAYLOG_ROOT_PASSWORD_SHA2}"
+      GRAYLOG_ROOT_USERNAME: "admin"
+      GRAYLOG_HTTP_BIND_ADDRESS: "0.0.0.0:9000"
+      GRAYLOG_HTTP_PUBLISH_URI:  "http://0.0.0.0:9000/"
+      GRAYLOG_HTTP_EXTERNAL_URI: "${GRAYLOG_HTTP_EXTERNAL_URI}"
+      GRAYLOG_OPENSEARCH_HOSTS:  "http://opensearch:9200"
+      GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
+      GRAYLOG_MONGODB_URI:       "mongodb://mongodb:27017/graylog"
+      GRAYLOG_HTTP_ENABLE_CORS:  "true"
+      GRAYLOG_HTTP_ENABLE_GZIP:  "true"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9000/ >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
-
     volumes:
       - gl_data:/usr/share/graylog/data
 
@@ -595,16 +557,16 @@ volumes:
   os_data: {}
   gl_data: {}
 YAML
-chown ${APP_USER}:${APP_GROUP} "${GL_DIR}/docker-compose.yml"
+  chown ${APP_USER}:${APP_GROUP} "${GL_DIR}/docker-compose.yml"
+fi
 
-# systemd unit (usa il wrapper dcompose)
+# systemd unit (wrapper dcompose)
 if [[ ! -s /etc/systemd/system/graylog-stack.service ]]; then
   cat >/etc/systemd/system/graylog-stack.service <<'EOF'
 [Unit]
 Description=Graylog stack (docker compose)
 After=docker.service network-online.target
 Wants=docker.service
-
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/netprobe/graylog
@@ -612,7 +574,6 @@ RemainAfterExit=yes
 ExecStart=/usr/local/bin/dcompose up -d
 ExecStop=/usr/local/bin/dcompose down
 ExecReload=/usr/local/bin/dcompose up -d
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -620,11 +581,6 @@ fi
 
 systemctl daemon-reload
 systemctl enable --now graylog-stack.service || true
-# in caso di primo avvio con pull, prova un retry
-if ! systemctl is-active --quiet graylog-stack.service; then
-  sleep 2
-  systemctl start graylog-stack.service || true
-fi
 
 # =====================================================================
 # SPEEDTEST CLI (Ookla) opzionale
@@ -689,11 +645,9 @@ echo -n "HTTP /smokeping/  : "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping
 echo -n "HTTP /cacti/      : "; curl -sI "http://127.0.0.1:${WEB_PORT}/cacti/" | head -n1 || true
 echo -n "Graylog backend   : "; curl -sI "http://127.0.0.1:9001/" | head -n1 || true
 echo -n "Graylog via proxy : "; curl -sI "http://127.0.0.1:${WEB_PORT}/graylog/" | head -n1 || true
-
 echo "Container:"
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | sed 's/^/  /'
 
 command -v speedtest >/dev/null 2>&1 && echo "Speedtest CLI presente." || echo "Speedtest CLI assente; fallback Python disponibile."
-
 echo -e "\nFATTO. Log: ${LOG}"
 echo "Benvenuto nel mondo del domani!"

@@ -190,7 +190,9 @@ def admin_home():
     </div>
   </div>
 </div>
-</div></body></html>"""
+</div>
+<script src="/static/bg.js"></script>
+</body></html>"""
     return HTMLResponse(html)
 
 # --- Targets UI --------------------------------------------------------------
@@ -496,7 +498,9 @@ def tuning_save(step: int = Form(...), pings: int = Form(...)):
     <a class='btn' href='/smokeping/'>Apri SmokePing</a>
   </div>
 </div>
-</div></body></html>"""
+</div>
+<script src="/static/bg.js"></script>
+</body></html>"""
     return HTMLResponse(html)
 
 # --- Actions ----------------------------------------------------------------

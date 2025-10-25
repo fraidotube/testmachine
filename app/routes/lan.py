@@ -191,7 +191,9 @@ def page(request: Request):
             "<h2>LAN</h2>"
             "<p class='danger'>Nessuna interfaccia fisica trovata.</p>"
             "<a class='btn secondary' href='/'>Indietro</a>"
-            "</div></div></div></body></html>"
+            "</div></div></div>"
+            "<script src='/static/bg.js' defer></script>"
+            "</body></html>"
         )
 
     if not choices:
@@ -202,7 +204,9 @@ def page(request: Request):
             f"<p class='muted'>Interfaccia WAN: <code>{escape(wan)}</code></p>"
             "<p class='danger'>Non ci sono altre interfacce disponibili da usare come LAN.</p>"
             "<a class='btn secondary' href='/'>Indietro</a>"
-            "</div></div></div></body></html>"
+            "</div></div></div>"
+            "<script src='/static/bg.js' defer></script>"
+            "</body></html>"
         )
 
     # --- CARD LAN -----------------------------------------------------------
@@ -326,7 +330,9 @@ def page(request: Request):
         ) +
         "</div>"
 
-        "</div></div></body></html>"
+        "</div></div>"
+        "<script src='/static/bg.js' defer></script>"
+        "</body></html>"
     )
 
 # ---- API: LAN ----------------------------------------------------------------
@@ -419,7 +425,9 @@ def set_lan(
         "<div class='grid'><div class='card'>"
         "<h2 class='ok'>LAN aggiornata</h2>"
         "<a class='btn secondary' href='/lan'>Indietro</a>"
-        "</div></div></div></body></html>"
+        "</div></div></div>"
+        "<script src='/static/bg.js' defer></script>"
+        "</body></html>"
     )
 
 # ---- API: LAN BRIDGE ---------------------------------------------------------
@@ -490,5 +498,7 @@ def bridge_set(
         "<div class='grid'><div class='card'>"
         "<h2 class='ok'>BRIDGE aggiornato</h2>"
         "<a class='btn secondary' href='/lan'>Indietro</a>"
-        "</div></div></div></body></html>"
+        "</div></div></div>"
+        "<script src='/static/bg.js' defer></script>"
+        "</body></html>"
     )

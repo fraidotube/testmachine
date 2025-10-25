@@ -4,8 +4,11 @@
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
 
+/* ---------------- Palette + variabili globali ---------------- */
 :root{
-  --bg-deep: #081a3a;
+  --bg-deep: #081a3a;          /* fallback di base */
+  --bg-url: url("/static/img/sfondo.png");  /* sovrascritta da bg.js */
+  --bg-solid: transparent;     /* usata per tinta unita */
 
   --text: #e9eefc;
   --muted: rgba(233,238,252,.82);
@@ -24,9 +27,23 @@ html,body{margin:0;padding:0}
   --warn: #f59e0b;
 }
 
-html{background-color:var(--bg-deep)}
+/* ---------------- Sfondo globale (vale per TUTTE le pagine) ---------------- */
+html{
+  min-height: 100%;
+  background-image:
+    linear-gradient(rgba(0,0,0,.35), rgba(0,0,0,.35)),
+    var(--bg-url);                 /* immagine (o 'none' per tinta) */
+  background-repeat: no-repeat, no-repeat;
+  background-position: center, center;
+  background-size: 100% 100%, cover;
+  background-attachment: fixed, fixed;
+  background-color: var(--bg-solid, var(--bg-deep)); /* tinta unita */
+}
+
+/* evita “strisce” in fondo sulle pagine corte */
 body{
-  /* la JS setta backgroundImage / backgroundColor */
+  min-height: 100vh;
+  background: transparent;        /* lo sfondo lo dipinge html */
   color: var(--text);
   font: 16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial,"Noto Sans","Liberation Sans",sans-serif;
   letter-spacing:.2px;
@@ -34,7 +51,7 @@ body{
 
 .container{max-width:1100px;margin:0 auto;padding:20px}
 
-/* NAV */
+/* ---------------- NAV ---------------- */
 .nav{display:flex;align-items:center;gap:16px;margin-bottom:16px}
 .brand{display:flex;align-items:center;gap:10px}
 .logo{width:128px;height:64px}
@@ -43,11 +60,11 @@ body{
 .nav .spacer a:hover{text-decoration:underline}
 @media (max-width:560px){.logo{width:44px;height:44px}.title-center{font-size:1.35rem}}
 
-/* Sezioni & griglia */
+/* ---------------- Sezioni & griglia ---------------- */
 .section-title{margin:6px 0 10px;font-size:1.1rem;opacity:.92}
 .grid{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
 
-/* Card base */
+/* ---------------- Card base ---------------- */
 .card{
   background: var(--card);
   border: 1px solid var(--card-border);
@@ -59,18 +76,16 @@ body{
 }
 .card h2{margin:0 0 6px;font-size:1.15rem}
 .card h3{margin:6px 0 8px;font-size:1.05rem}
-
-/* micro-glow */
 .card::after{
   content:""; position:absolute; inset:0; pointer-events:none; border-radius:16px;
   background: radial-gradient(120% 80% at 30% -20%, rgba(255,255,255,.04), transparent 60%);
 }
 
-/* Testi */
+/* ---------------- Testi ---------------- */
 .muted{color:var(--muted)}
 .muted-small{color:var(--muted);font-size:.95rem}
 
-/* Bottoni */
+/* ---------------- Bottoni ---------------- */
 .btn{
   display:inline-flex;align-items:center;justify-content:center;
   padding:9px 14px;border-radius:10px;background:var(--btn);color:#fff;text-decoration:none;
@@ -85,7 +100,7 @@ body{
 .btn.danger{background:var(--danger)}
 .btn.danger:hover{filter:brightness(1.03)}
 
-/* Pulsanti centrati nelle tool/settings card */
+/* pulsanti centrati nelle tool/settings card */
 .card--tool .btn,
 .card--settings .btn{
   display:flex; margin:12px auto 4px; min-width:160px;
@@ -96,7 +111,7 @@ body{
   background:var(--btn-2-hover); transform:translateY(-1px); filter:brightness(1.03);
 }
 
-/* Accento tenue bottoni per card specifiche */
+/* accento leggero per tipo di tool */
 .card--tool .btn{ transition: box-shadow .18s ease, filter .15s ease }
 .card--smokeping .btn{ box-shadow: 0 6px 16px rgba(190,40,60,.14), inset 0 0 0 1px rgba(190,40,60,.18); }
 .card--smokeping .btn:hover{ box-shadow: 0 8px 18px rgba(190,40,60,.20), inset 0 0 0 1px rgba(190,40,60,.22); }
@@ -117,7 +132,7 @@ body{
 .card--alerts .btn{ box-shadow: 0 6px 16px rgba(180,60,165,.14), inset 0 0 0 1px rgba(180,60,165,.18); }
 .card--alerts .btn:hover{ box-shadow: 0 8px 18px rgba(180,60,165,.20), inset 0 0 0 1px rgba(180,60,165,.22); }
 
-/* Form */
+/* ---------------- Form ---------------- */
 label{display:block;margin:10px 0 6px;font-weight:600}
 input,select,textarea{
   width:100%;padding:9px 10px;border-radius:10px;
@@ -129,21 +144,21 @@ input::placeholder,textarea::placeholder{color:rgba(255,255,255,.55)}
 .row{display:grid;gap:12px;grid-template-columns:1fr 1fr}
 @media (max-width:720px){.row{grid-template-columns:1fr}}
 
-/* Tabelle */
+/* ---------------- Tabelle ---------------- */
 .table{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .table table{width:100%;border-collapse:collapse;table-layout:auto}
 .table th,.table td{white-space:nowrap;padding:8px 10px;border-bottom:1px dashed rgba(255,255,255,.07)}
 .table thead th{position:sticky;top:0;background:rgba(255,255,255,.08);backdrop-filter:saturate(120%)}
 
-/* Footer */
+/* ---------------- Footer ---------------- */
 .footer{margin:26px 0 6px;opacity:.75;font-size:.95rem}
 
-/* Utility */
+/* ---------------- Utility ---------------- */
 .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;font-size:.9rem;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18)}
 .badge.locked::before{content:"🔒";font-size:.95rem}
 code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
 
-/* Status widget (home) */
+/* ---------------- Status widget (home) ---------------- */
 .status-grid{display:grid;gap:12px;grid-template-columns:1.1fr 1fr 1.2fr}
 @media (max-width:1000px){.status-grid{grid-template-columns:1fr 1fr}}
 @media (max-width:620px){.status-grid{grid-template-columns:1fr}}
@@ -152,7 +167,7 @@ code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mo
 .dot{width:9px;height:9px;border-radius:50%}
 .ok{background:var(--ok)}.bad{background:var(--danger)}.warn{background:var(--warn)}
 
-/* PCAP elenco */
+/* ---------------- PCAP elenco ---------------- */
 .pcap-list{width:100%;display:flex;flex-direction:column;gap:10px}
 .pcap-row{
   display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;
@@ -167,7 +182,7 @@ code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mo
 @media (max-width:1100px){.pcap-row{grid-template-columns:1fr auto}.pcap-actions{grid-column:1/-1;justify-self:start}}
 @media (max-width:700px){.pcap-row{grid-template-columns:1fr}.pcap-size,.pcap-actions{justify-self:start}}
 
-/* Card brandizzate (armonizzate) */
+/* ---------------- Card brandizzate (armonizzate) ---------------- */
 .card--smokeping{ background: linear-gradient(160deg, rgba(190, 40, 60, .30), rgba(190, 40, 60, .12)) !important; border-color: rgba(190, 40, 60, .42) !important; }
 .card--pcap{      background: linear-gradient(160deg, rgba(28, 106, 215, .30), rgba(28, 106, 215, .12)) !important; border-color: rgba(28, 106, 215, .42) !important; }
 .card--speedtest{ background: linear-gradient(160deg, rgba(12, 150, 150, .30), rgba(12, 150, 150, .12)) !important; border-color: rgba(12, 150, 150, .42) !important; }
@@ -178,79 +193,31 @@ code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mo
 .card--shell{     background: linear-gradient(160deg, rgba(90, 97, 110, .28), rgba(90, 97, 110, .12)) !important; border-color: rgba(120, 130, 145, .40) !important; }
 .card--alerts{    background: linear-gradient(160deg, rgba(180, 60, 165, .30), rgba(180, 60, 165, .12)) !important; border-color: rgba(180, 60, 165, .42) !important; }
 
-/* --- Nuova sezione servizi dentro la status card --- */
+/* ---------------- Servizi (home) ---------------- */
 .hr-thin{
-  border:0; height:1px; margin:10px -6px 8px;
+  border:0; height:1px; margin:8px -6px 6px;
   background: linear-gradient(90deg, rgba(255,255,255,.18), rgba(255,255,255,.06));
 }
 .services-row{ display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap; }
 .services-title{ font-weight:700; opacity:.92; margin-top:2px; min-width:80px; }
-.svc-inline{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; flex:1; }
+.svc-inline{ display:flex; gap:6px; flex-wrap:wrap; align-items:center; flex:1; }
 .svc-inline .pill{ background: rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.12); }
 
-/* Background picker in fondo */
-.bgpicker{ display:flex; align-items:center; gap:8px; justify-content:flex-end; margin:14px 0 6px; }
+/* header card flex (niente “float”) */
+.card h2{ display:flex; align-items:center; gap:10px; }
+.card h2 .right{ margin-left:auto; float:none; }
 
-/* Header card come flex: niente float "ombre" sotto al bottone */
-.card h2{
-  display:flex;
-  align-items:center;
-  gap:10px;
-  margin:0 0 6px;      /* già presente, va bene così */
+/* bottone “Aggiorna” compatto */
+.card--status h2 .btn{
+  padding:6px 10px; font-size:.9rem; line-height:1.1; border-radius:8px; min-width:auto;
+  background:var(--btn-2); border-color:rgba(255,255,255,.14); box-shadow:0 4px 12px rgba(0,0,0,.20);
 }
-.card h2 .right{
-  margin-left:auto;    /* spinge a destra */
-  float:none;          /* disattiva il vecchio float */
-}
+.card--status h2 .btn:hover{ background:var(--btn-2-hover); transform:translateY(-1px); filter:brightness(1.03); }
 
-/* opzionale: riduci ancora il respiro sopra/basso della riga servizi */
-.hr-thin{ margin:8px -6px 6px; }
-.svc-inline{ gap:6px; }
-
-
-/* Aggiorna (header status): compatto, come i bottoni nelle card */
-.card--status h2 .btn {
-  padding: 6px 10px;         /* più piccolo */
-  font-size: .90rem;
-  line-height: 1.1;
-  border-radius: 8px;
-  min-width: auto;           /* niente larghezze “minime” */
-  background: var(--btn-2);  /* come i bottoni delle card */
-  border-color: rgba(255,255,255,.14);
-  box-shadow: 0 4px 12px rgba(0,0,0,.20);
-}
-.card--status h2 .btn:hover{
-  background: var(--btn-2-hover);
-  transform: translateY(-1px);
-  filter: brightness(1.03);
-}
-
-/* Allinea tutte le tool cards: ignora eventuali margin-top inline */
+/* ignora eventuali margin-top inline nelle tool card */
 .grid .card.card--tool{ margin-top:0 !important; }
 
-/* --- Sfondo: compattiamo il selettore in fondo --- */
-.bgpicker{
-  display:flex;
-  align-items:center;
-  gap:10px;
-  margin:8px 0 24px;
-}
-
-.bgpicker label{
-  white-space:nowrap;
-  opacity:.9;
-}
-
-/* override della regola globale width:100% */
-.bgpicker .bgsel{
-  width:auto !important;
-  min-width: 160px;
-  max-width: 260px;
-  display:inline-block !important;
-}
-
-/* opzionale: allineamento a destra del bordo */
-.bgpicker .bgsel{
-  padding:8px 10px;
-  border-radius:10px;
-}
+/* ---------------- Bg picker compatto ---------------- */
+.bgpicker{ display:flex; align-items:center; gap:10px; margin:8px 0 24px; justify-content:flex-end; }
+.bgpicker label{ white-space:nowrap; opacity:.9; }
+.bgpicker .bgsel{ width:auto !important; min-width:160px; max-width:260px; display:inline-block !important; padding:8px 10px; border-radius:10px; }

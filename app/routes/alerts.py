@@ -142,7 +142,9 @@ def alerts_page(request: Request):
     </form>
   </div>
 </div>
-</div></body></html>
+</div>
+<script src="/static/bg.js"></script>
+</body></html>
 """
     return HTMLResponse(html)
 

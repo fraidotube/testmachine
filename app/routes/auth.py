@@ -195,7 +195,9 @@ def login_form(request: Request, next: str = "/"):
         "  </form>"
         "  <p class='muted'>Default: <code>admin</code> / <code>admin</code>.</p>"
         "</div>"
-        "</div></body></html>"
+        "</div>"
+        "<script src='/static/bg.js' defer></script>"
+        "</body></html>"
     )
     return HTMLResponse(content=html)
 
@@ -297,7 +299,9 @@ def users_page(request: Request):
         "    <p class='muted'>Se cambi la tua password è obbligatoria la password attuale.</p>"
         "  </div>"
         "</div>"
-        "</div></body></html>"
+        "</div>"
+        "<script src='/static/bg.js' defer></script>"
+        "</body></html>"
     )
     return HTMLResponse(page)
 

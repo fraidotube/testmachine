@@ -413,6 +413,7 @@ async function pollStatus(){
 setInterval(pollStatus, __POLL__);
 pollStatus();
 </script>
+<script src="/static/bg.js"></script>
 </body></html>
 """
     html = html.replace("__OPT__", opt).replace("__LIST__", list_html)

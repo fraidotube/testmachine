@@ -268,7 +268,9 @@ def settings_home(request: Request):
       {clock_card}
       {maint_card}
       {cacti_card}
-    </div></div></body></html>"""
+    </div></div>
+    <script src="/static/bg.js"></script>
+    </body></html>"""
     return HTMLResponse(html)
 
 # ------------------- Azioni porta (INVARIATE) -------------------

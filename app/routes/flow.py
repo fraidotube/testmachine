@@ -500,7 +500,7 @@ fetchStatus();
 refreshAll();
 setInterval(function(){ fetchStatus(); refreshAll(); }, 10000);
 </script>
-
+<script src="/static/bg.js"></script>
 </body></html>
 """
     html = html.replace("__IFACE_OPTIONS__", iface_options)

@@ -164,7 +164,9 @@ def page(request: Request):
             "<h2>WAN</h2>"
             "<p class='danger'>Nessuna interfaccia fisica trovata.</p>"
             "<a class='btn secondary' href='/'>Indietro</a>"
-            "</div></div></div></body></html>"
+            "</div></div></div>"
+            "<script src='/static/bg.js' defer></script>"
+            "</body></html>"
         )
 
     cur = _read_current_wan()
@@ -230,7 +232,9 @@ def page(request: Request):
         "sync(); modeEl.addEventListener('change',sync);"
         "</script>"
 
-        "</div></div></div></body></html>"
+        "</div></div></div>"
+        "<script src='/static/bg.js' defer></script>"
+        "</body></html>"
     )
 
 
@@ -318,5 +322,7 @@ def set_wan(
         "<div class='grid'><div class='card'>"
         "<h2 class='ok'>WAN aggiornata</h2>"
         "<a class='btn secondary' href='/wan'>Indietro</a>"
-        "</div></div></div></body></html>"
+        "</div></div></div>"
+        "<script src='/static/bg.js' defer></script>"
+        "</body></html>"
     )

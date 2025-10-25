@@ -484,6 +484,7 @@ async function editNote(id){
   location.reload();
 }
 </script>
+<script src="/static/bg.js"></script>
 </body></html>
 """
     html = html.replace("__OPT__", opt)

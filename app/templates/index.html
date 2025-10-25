@@ -47,8 +47,7 @@
     .section-title{margin-top:18px}
 
     /* griglia base */
-    .grid{display:grid;gap:18px;grid-templ
-    
+    .grid{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
   </style>
 </head>
 <body>
@@ -271,6 +270,7 @@
     <div class="footer">© TestMachine – Debian 12.6 - Author: Fraidotube</div>
   </div>
 
+  <!-- JS pagina: solo lo stretto necessario + bg.js globale -->
   <script>
     function humanBytes(b){
       if(b==null) return "-";
@@ -354,99 +354,16 @@
             (o.ipv6||[]).map(a=>"<div class='addr mono'>IPv6: "+a+"</div>").join("");
           ifEl.appendChild(box);
         }
-
-        // compat vecchi campi
-        const capsEl = document.getElementById("caps");
-        if (capsEl) capsEl.textContent = js.dumpcap_caps || "n/d";
-        const tsEl = document.getElementById("ts");
-        if (tsEl) {
-          const ts = new Date((js.time||Date.now())*1000);
-          tsEl.textContent = ts.toLocaleString();
-        }
       }catch(e){
         // non rompiamo la UI
       }
     }
 
-    // ---- Sfondi: immagini + tinte unite ----
-    function setBg(choice){
-      document.body.style.backgroundRepeat     = "no-repeat, no-repeat";
-      document.body.style.backgroundPosition   = "center, center";
-      document.body.style.backgroundSize       = "100% 100%, cover";
-      document.body.style.backgroundAttachment = "fixed, fixed";
-
-      if (choice && choice.startsWith("solid:")){
-        const color = choice.slice(6);
-        document.body.style.backgroundImage = `linear-gradient(rgba(0,0,0,.35), rgba(0,0,0,.35))`;
-        document.body.style.backgroundColor = color;
-      } else {
-        const url = choice || "/static/img/sfondo.png";
-        document.body.style.backgroundColor = "";
-        document.body.style.backgroundImage =
-          `linear-gradient(rgba(0,0,0,.35), rgba(0,0,0,.35)), url("${url}")`;
-      }
-    }
-
-    async function initBgSelector(){
-      const sel = document.getElementById('bgSelect');
-      const fallback = "/static/img/sfondo.png";
-      const solids = [
-        { value: "solid:#0b1226", label: "Blu scuro" },
-        { value: "solid:#111827", label: "Grafite"   },
-        { value: "solid:#0f172a", label: "Slate"     },
-        { value: "solid:#0a0a0a", label: "Nero"      },
-      ];
-      try{
-        const r  = await fetch('/bg/list');
-        const js = await r.json();
-
-        const files   = Array.isArray(js.files) ? js.files : [];
-        const labels  = (js.labels && typeof js.labels === 'object') ? js.labels : {};
-        const current = js.current || files[0] || fallback;
-
-        // etichette “Sfondo N” dal server, con fallback locale
-        const optsImgs = files.map((f,i)=>{
-          const lab = labels[f] || `Sfondo ${i+1}`;
-          return `<option value="${f}" ${f===current?'selected':''}>${lab}</option>`;
-        }).join('');
-
-        const optsSolids =
-          `<optgroup label="Tinta unita">` +
-          solids.map(s =>
-            `<option value="${s.value}" ${s.value===current?'selected':''}>${s.label}</option>`
-          ).join('') +
-          `</optgroup>`;
-
-        sel.innerHTML = optsImgs + optsSolids;
-
-        if(current.startsWith("solid:")){
-          setBg(current);
-        }else{
-          const img = new Image();
-          img.onload  = ()=> setBg(current);
-          img.onerror = ()=> setBg(fallback);
-          img.src = current;
-        }
-
-        sel.addEventListener('change', async ()=>{
-          const val = sel.value;
-          setBg(val);
-          try{
-            await fetch('/bg/set', {
-              method:'POST',
-              headers:{'Content-Type':'application/json'},
-              body: JSON.stringify({file: val})
-            });
-          }catch(_){}
-        });
-      }catch(_){
-        setBg(fallback);
-      }
-    }
-
     refreshStatus();
     setInterval(refreshStatus, 5000);
-    document.addEventListener('DOMContentLoaded', initBgSelector);
   </script>
+
+  <!-- unico JS globale per lo sfondo -->
+  <script src="/static/bg.js" defer></script>
 </body>
 </html>

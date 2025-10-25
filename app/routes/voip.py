@@ -566,6 +566,7 @@ setInterval(refreshIndex, __POLL__);
 pollStatus();
 refreshIndex();
 </script>
+<script src="/static/bg.js"></script>
 </body></html>
 """
     html = html.replace("__OPT__", opt)

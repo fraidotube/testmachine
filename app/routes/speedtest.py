@@ -583,6 +583,7 @@ async function cancelTest(){ await fetch('/speedtest/cancel',{method:'POST'}); s
 timer=setInterval(status, 1000);
 status(); histRefresh();
 </script>
+<script src="/static/bg.js"></script>
 </body></html>
 """
     return HTMLResponse(head + body)

@@ -266,6 +266,7 @@ async function load(){
 document.getElementById('f').addEventListener('submit', (ev)=>{ev.preventDefault(); load();});
 load();
 </script>
+<script src="/static/bg.js"></script>
 </body></html>
 """
     return HTMLResponse(html)

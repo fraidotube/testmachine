@@ -307,18 +307,33 @@ def set_port(request: Request, port: int = Form(...)):
 Listen {port}
 """
     vhost_txt = f"""<VirtualHost *:{port}>
+
     ServerName testmachine.local
     ProxyPreserveHost On
-    ProxyPass        /api/ws ws://127.0.0.1:9000/api/ws
-    ProxyPassReverse /api/ws ws://127.0.0.1:9000/api/ws
-    ProxyPass        /shell/ws ws://127.0.0.1:9000/shell/ws
-    ProxyPassReverse /shell/ws ws://127.0.0.1:9000/shell/ws
+    ProxyRequests Off
+    RequestHeader set X-Forwarded-Proto "http"
+
+    # Esclusioni prima
     ProxyPass /smokeping/ !
-    ProxyPass /cgi-bin/ !
-    ProxyPass /cacti/ !
-    ProxyPass        / http://127.0.0.1:9000/
-    ProxyPassReverse / http://127.0.0.1:9000/
-    ErrorLog /var/log/apache2/testmachine-error.log
+    ProxyPass /cgi-bin/   !
+    ProxyPass /cacti/     !
+
+    # Graylog sotto /graylog (rewrite cookie SOLO qui)
+    <Location "/graylog/">
+      ProxyPassReverseCookiePath / /graylog/
+    </Location>
+    ProxyPass        /graylog/          http://127.0.0.1:9001/
+    ProxyPassReverse /graylog/          http://127.0.0.1:9001/
+    ProxyPass        /graylog/api/ws    ws://127.0.0.1:9001/api/ws
+    ProxyPassReverse /graylog/api/ws    ws://127.0.0.1:9001/api/ws
+    ProxyPass        /graylog/shell/ws  ws://127.0.0.1:9001/shell/ws
+    ProxyPassReverse /graylog/shell/ws  ws://127.0.0.1:9001/shell/ws
+
+    # App FastAPI (root)
+    ProxyPass        /  http://127.0.0.1:9000/
+    ProxyPassReverse /  http://127.0.0.1:9000/
+
+    ErrorLog  /var/log/apache2/testmachine-error.log
     CustomLog /var/log/apache2/testmachine-access.log combined
 </VirtualHost>
 """

@@ -61,6 +61,13 @@ if [[ -f "$SNMPCFG" ]]; then
   sed -i 's/^[[:space:]]*mibs[[:space:]]*:.*/# mibs :/g' "$SNMPCFG" || true
 fi
 
+# ---------------------------------------------------------------------
+# Docker
+# ---------------------------------------------------------------------
+step "Docker + compose"
+apt-get install -y --no-install-recommends docker.io docker-compose-plugin
+systemctl enable --now docker
+
 # =====================================================================
 # UTENTE/REPO APP
 # =====================================================================
@@ -260,29 +267,37 @@ a2enmod proxy_fcgi setenvif >/dev/null || true
 sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
 grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 
-step "Site testmachine.conf (escludo /smokeping/ /cgi-bin/ /cacti/ + WS)"
+step "Site testmachine.conf (API/WS + Graylog + esclusioni /smokeping /cgi-bin /cacti)"
 cat >/etc/apache2/sites-available/testmachine.conf <<EOF
 <VirtualHost *:${WEB_PORT}>
   ServerName testmachine
 
-  ErrorLog  \${APACHE_LOG_DIR}/testmachine-error.log
-  CustomLog \${APACHE_LOG_DIR}/testmachine-access.log combined
+  ErrorLog  /var/log/apache2/testmachine-error.log
+  CustomLog /var/log/apache2/testmachine-access.log combined
 
   ProxyPreserveHost On
+  ProxyRequests Off
   RequestHeader set X-Forwarded-Proto "http"
 
-  # WebSocket
+  # WebSocket verso l'app FastAPI
   ProxyPass        /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
   ProxyPassReverse /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
   ProxyPass        /shell/ws ws://127.0.0.1:${API_PORT}/shell/ws
   ProxyPassReverse /shell/ws ws://127.0.0.1:${API_PORT}/shell/ws
 
-  # Non proxy verso l'app:
+  # Non proxy verso l'app
   ProxyPass /smokeping/ !
   ProxyPass /cgi-bin/   !
   ProxyPass /cacti/     !
 
-  # App FastAPI
+  # Graylog pubblicato su sottopercorso /graylog/
+  ProxyPass        /graylog/        http://127.0.0.1:9001/
+  ProxyPassReverse /graylog/        http://127.0.0.1:9001/
+  ProxyPass        /graylog/api/ws  ws://127.0.0.1:9001/api/ws
+  ProxyPassReverse /graylog/api/ws  ws://127.0.0.1:9001/api/ws
+  ProxyPassReverseCookiePath / /graylog/
+
+  # App FastAPI (default)
   ProxyPass        / http://127.0.0.1:${API_PORT}/
   ProxyPassReverse / http://127.0.0.1:${API_PORT}/
 </VirtualHost>
@@ -440,6 +455,128 @@ fi
 sudo -u www-data -- php /usr/share/cacti/site/poller.php -f || true
 
 # =====================================================================
+# GRAYLOG (Docker stack)
+# =====================================================================
+step "Graylog stack (docker compose)"
+
+GL_DIR=/opt/netprobe/graylog
+install -d -m 0755 -o ${APP_USER} -g ${APP_GROUP} "${GL_DIR}"
+
+# Rileva IP locale per HTTP_EXTERNAL_URI
+SELF_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+SELF_IP="${SELF_IP:-127.0.0.1}"
+
+# Genera segreti/password (default admin/admin)
+GL_SECRET="$(openssl rand -hex 64)"
+GL_SHA="$(printf %s 'admin' | sha256sum | awk '{print $1}')"
+GL_EXT_URI="http://${SELF_IP}:${WEB_PORT}/graylog/"
+
+# .env (idempotente: se esiste conserva SECRET e SHA, aggiorna solo l'URL)
+ENV_FILE="${GL_DIR}/.env"
+if [[ -f "${ENV_FILE}" ]]; then
+  sed -i "s|^GRAYLOG_HTTP_EXTERNAL_URI=.*|GRAYLOG_HTTP_EXTERNAL_URI=${GL_EXT_URI}|" "${ENV_FILE}"
+else
+  cat >"${ENV_FILE}" <<EOF
+GRAYLOG_PASSWORD_SECRET=${GL_SECRET}
+GRAYLOG_ROOT_PASSWORD_SHA2=${GL_SHA}
+GRAYLOG_HTTP_EXTERNAL_URI=${GL_EXT_URI}
+EOF
+  chown ${APP_USER}:${APP_GROUP} "${ENV_FILE}"
+  chmod 0640 "${ENV_FILE}"
+fi
+
+# docker-compose.yml
+if [[ ! -s "${GL_DIR}/docker-compose.yml" ]]; then
+  cat > "${GL_DIR}/docker-compose.yml" <<'YAML'
+services:
+  mongodb:
+    image: mongo:6
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD","mongosh","--eval","db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - mongo_data:/data/db
+
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile:  { soft: 65536, hard: 65536 }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD","curl","-sSf","http://localhost:9200/_cluster/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - os_data:/usr/share/opensearch/data
+
+  graylog:
+    image: graylog/graylog:6.0
+    depends_on:
+      mongodb:   { condition: service_healthy }
+      opensearch:{ condition: service_healthy }
+    restart: unless-stopped
+    environment:
+      - GRAYLOG_PASSWORD_SECRET=${GRAYLOG_PASSWORD_SECRET}
+      - GRAYLOG_ROOT_PASSWORD_SHA2=${GRAYLOG_ROOT_PASSWORD_SHA2}
+      - GRAYLOG_ROOT_USERNAME=admin
+      - GRAYLOG_HTTP_PUBLISH_URI=http://0.0.0.0:9000/
+      - GRAYLOG_HTTP_EXTERNAL_URI=${GRAYLOG_HTTP_EXTERNAL_URI}
+    healthcheck:
+      test: ["CMD","curl","-sSf","http://localhost:9000/api/system/lbstatus"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    ports:
+      - "127.0.0.1:9001:9000"
+      - "0.0.0.0:5514:1514/tcp"
+      - "0.0.0.0:5514:1514/udp"
+    volumes:
+      - gl_data:/usr/share/graylog/data
+
+volumes:
+  mongo_data: {}
+  os_data: {}
+  gl_data: {}
+YAML
+  chown ${APP_USER}:${APP_GROUP} "${GL_DIR}/docker-compose.yml"
+fi
+
+# systemd unit
+if [[ ! -s /etc/systemd/system/graylog-stack.service ]]; then
+  cat >/etc/systemd/system/graylog-stack.service <<'EOF'
+[Unit]
+Description=Graylog stack (docker compose)
+After=docker.service network-online.target
+Wants=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/netprobe/graylog
+RemainAfterExit=yes
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+ExecReload=/usr/bin/docker compose up -d
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
+systemctl daemon-reload
+systemctl enable --now graylog-stack.service
+
+# =====================================================================
 # SPEEDTEST CLI (Ookla) opzionale
 # =====================================================================
 step "Ookla speedtest (opzionale)"
@@ -500,18 +637,12 @@ apachectl -t || true
 echo -n "HTTP /            : "; curl -sI "http://127.0.0.1:${WEB_PORT}/" | head -n1 || true
 echo -n "HTTP /smokeping/  : "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping/" | head -n1 || true
 echo -n "HTTP /cacti/      : "; curl -sI "http://127.0.0.1:${WEB_PORT}/cacti/" | head -n1 || true
-
-# Test rapido DB come www-data (usa /etc/cacti/debian.php)
-if sudo -u www-data -- php -r 'include "/etc/cacti/debian.php";
-$m=new mysqli($database_hostname,$database_username,$database_password,$database_default,(int)$database_port?:3306);
-echo $m->connect_error ? "DB ERR\n" : "DB OK\n";' 2>/dev/null | grep -q "DB OK"; then
-  echo "Cacti DB OK (www-data)"
-else
-  echo "Attenzione: test DB Cacti fallito (vedi sopra)."
-fi
+echo -n "Graylog backend   : "; curl -sI "http://127.0.0.1:9001/" | head -n1 || true
+echo -n "Graylog via proxy : "; curl -sI "http://127.0.0.1:${WEB_PORT}/graylog/" | head -n1 || true
+echo "Container:"
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | sed 's/^/  /'
 
 command -v speedtest >/dev/null 2>&1 && echo "Speedtest CLI presente." || echo "Speedtest CLI assente; fallback Python disponibile."
 
 echo -e "\nFATTO. Log: ${LOG}"
-
 echo "Benvenuto nel mondo del domani!"

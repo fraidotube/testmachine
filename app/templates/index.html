@@ -36,6 +36,7 @@
     .card--voip{      background: linear-gradient(160deg, rgba(16,255,255,.25), rgba(5,150,105,.10)); border: 1px solid rgba(16,185,129,.35); }
     .card--cacti{     background: linear-gradient(160deg, rgba(34,197,94,.25), rgba(34,197,94,.08)); border: 1px solid rgba(34,197,94,.35); }
     .card--nat{    background: linear-gradient(160deg, rgba(23,100,100,0.25), rgba(100,0,0,.10)); border: 1px solid rgba(255,255,255,.35); }
+    .card--graylog{    background: linear-gradient(160deg, rgba(123,00,100,0.25), rgba(100,150,0,.10)); border: 1px solid rgba(255,255,255,.35); }
     .tool-icon{width:26px;height:26px;opacity:.95}
 
     /* ---------- SETTINGS CARDS UNIFORME ---------- */
@@ -206,6 +207,14 @@
         </h2>
         <p class="muted">NAT info, MTU scan, traceroute e upnp</p>
         <a class="btn" href="/nat/">Apri NAT info</a>
+      </div>
+      <div class="card card--tool card--graylog" style="margin-top:6px">
+        <h2>
+          <img class="tool-icon" src="/static/img/graylog.svg" alt="Graylog" onerror="this.style.display='none'">
+          Graylog
+        </h2>
+        <p class="muted">Syslog personalizzabile con UI. Porta esterne 1514->5514</p>
+        <a class="btn" href="/graylog/">Apri Graylog</a>
       </div>
     </div>
 

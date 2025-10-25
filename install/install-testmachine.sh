@@ -35,7 +35,7 @@ step "APT update & pacchetti base"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-  git ca-certificates curl sudo jq debconf-utils \
+  git ca-certificates curl sudo jq debconf-utils gnupg \
   python3 python3-venv python3-pip \
   apache2 apache2-utils \
   smokeping fping \
@@ -62,11 +62,37 @@ if [[ -f "$SNMPCFG" ]]; then
 fi
 
 # ---------------------------------------------------------------------
-# Docker
+# Docker (repo ufficiale) + compose v2
 # ---------------------------------------------------------------------
-step "Docker + compose"
-apt-get install -y --no-install-recommends docker.io docker-compose-plugin
+step "Docker CE + compose (repo ufficiale)"
+apt-get install -y --no-install-recommends ca-certificates curl gnupg
+install -m 0755 -d /etc/apt/keyrings
+if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
+  curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  chmod a+r /etc/apt/keyrings/docker.gpg
+fi
+arch="$(dpkg --print-architecture)"
+codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-bookworm}")"
+echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${codename} stable" > /etc/apt/sources.list.d/docker.list
+apt-get update
+apt-get install -y --no-install-recommends \
+  docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
+
+# Wrapper dcompose: usa 'docker compose' o 'docker-compose' legacy
+cat >/usr/local/bin/dcompose <<'EOF'
+#!/usr/bin/env bash
+set -e
+if docker compose version >/dev/null 2>&1; then
+  exec docker compose "$@"
+elif command -v docker-compose >/dev/null 2>&1; then
+  exec docker-compose "$@"
+else
+  echo "Errore: nè 'docker compose' nè 'docker-compose' sono disponibili." >&2
+  exit 127
+fi
+EOF
+chmod +x /usr/local/bin/dcompose
 
 # =====================================================================
 # UTENTE/REPO APP
@@ -93,7 +119,6 @@ python3 -m venv "${APP_DIR}/venv"
 if [[ -f "${APP_DIR}/requirements.txt" ]]; then
   "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
 else
-  # include websockets/wsproto per la console
   "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart speedtest-cli websockets wsproto
 fi
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
@@ -552,7 +577,7 @@ YAML
   chown ${APP_USER}:${APP_GROUP} "${GL_DIR}/docker-compose.yml"
 fi
 
-# systemd unit
+# systemd unit (usa il wrapper dcompose)
 if [[ ! -s /etc/systemd/system/graylog-stack.service ]]; then
   cat >/etc/systemd/system/graylog-stack.service <<'EOF'
 [Unit]
@@ -564,9 +589,9 @@ Wants=docker.service
 Type=oneshot
 WorkingDirectory=/opt/netprobe/graylog
 RemainAfterExit=yes
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
-ExecReload=/usr/bin/docker compose up -d
+ExecStart=/usr/local/bin/dcompose up -d
+ExecStop=/usr/local/bin/dcompose down
+ExecReload=/usr/local/bin/dcompose up -d
 
 [Install]
 WantedBy=multi-user.target
@@ -639,6 +664,7 @@ echo -n "HTTP /smokeping/  : "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping
 echo -n "HTTP /cacti/      : "; curl -sI "http://127.0.0.1:${WEB_PORT}/cacti/" | head -n1 || true
 echo -n "Graylog backend   : "; curl -sI "http://127.0.0.1:9001/" | head -n1 || true
 echo -n "Graylog via proxy : "; curl -sI "http://127.0.0.1:${WEB_PORT}/graylog/" | head -n1 || true
+
 echo "Container:"
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | sed 's/^/  /'
 

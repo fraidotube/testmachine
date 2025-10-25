@@ -1,16 +1,15 @@
 # routes/bg.py
 from fastapi import APIRouter, Body
 from pathlib import Path
-import json, os
+import json, os, re
 
 router = APIRouter(prefix="/bg", tags=["background"])
 
-# cartella immagini (risoluzione robusta)
+# Cartella immagini (risoluzione robusta)
 def _img_dir() -> Path:
     env = os.getenv("STATIC_IMG_DIR")
     if env and Path(env).exists():
         return Path(env)
-    # prova percorsi comuni
     for cand in [
         Path(__file__).resolve().parent.parent / "static" / "img",  # app/static/img
         Path("static/img").resolve(),
@@ -53,19 +52,17 @@ def list_bg():
     cur = _read_state().get("bg", DEFAULT_BG)
     if files and cur not in files:
         cur = files[0]
-    # etichette 1..n lato API
-    labels = {f: str(i+1) for i, f in enumerate(files)}
+    # Etichette “Sfondo 1..n”
+    labels = {f: f"Sfondo {i+1}" for i, f in enumerate(files)}
     return {"ok": True, "files": files, "labels": labels, "current": cur}
 
 @router.post("/set")
 def set_bg(file: str = Body(..., embed=True)):
-    files = _list_candidates()
-    # accetta: 1) file tra i candidati  2) tinta unita "solid:#RRGGBB"
+    files = _list_files()
+    # Accetta: 1) file tra i candidati  2) tinta unita "solid:#RRGGBB"
     if file in files:
         choice_ok = True
     else:
-        # valida "solid:#rrggbb"
-        import re
         choice_ok = bool(re.fullmatch(r"solid:#([0-9a-fA-F]{6})", file))
     if not choice_ok:
         return {"ok": False, "error": "Scelta non valida"}

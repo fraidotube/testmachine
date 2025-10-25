@@ -5,6 +5,7 @@ import subprocess, shutil, socket, time
 
 router = APIRouter(prefix="/status", tags=["status"])
 
+# --------------------------- helpers ---------------------------------
 def _run(cmd:list[str], timeout:int|None=10):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -27,10 +28,8 @@ def _disk_usage(path:str="/"):
         return {"total": None, "used": None, "free": None}
 
 def _ip_addresses():
-    # IPv4
+    # IPv4 (coerente con la tua versione: IPv6 lasciato off per non cambiare comportamento)
     rc4, out4, _ = _run(["/usr/sbin/ip","-o","-4","addr","show","up"])
-    # IPv6 (lasciato disabilitato come nelle versioni precedenti per non cambiare comportamento)
-    # rc6, out6, _ = _run(["/usr/sbin/ip","-o","-6","addr","show","up"])
 
     data: dict[str, dict] = {}
     if rc4 == 0:
@@ -44,6 +43,8 @@ def _ip_addresses():
                     data[iface] = {"ipv4": [], "ipv6": []}
                 data[iface]["ipv4"].append(addr)
 
+    # # IPv6 (se un domani vuoi attivarlo)
+    # rc6, out6, _ = _run(["/usr/sbin/ip","-o","-6","addr","show","up"])
     # if rc6 == 0:
     #     for line in out6.splitlines():
     #         parts = line.split()
@@ -74,6 +75,27 @@ def _dumpcap_caps():
     # fallback: se getcap non disponibile/errore
     return None
 
+# --------------------------- extra: nuovi servizi ---------------------
+def _php_fpm_unit()->str:
+    rc, out, _ = _run(["/usr/bin/php","-r","echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;"])
+    ver = (out or "").strip()
+    return f"php{ver}-fpm" if ver else "php-fpm"
+
+def _exporter_instances():
+    # elenca eventuali istanze netprobe-flow-exporter@*.service attive/failed
+    rc, out, _ = _run([
+        "/bin/systemctl","list-units","netprobe-flow-exporter@*.service",
+        "--state=active,running,failed","--no-legend","--no-pager"
+    ])
+    units=[]
+    if rc == 0 and out:
+        for line in out.splitlines():
+            parts = line.split()
+            if parts:
+                units.append(parts[0])  # es. netprobe-flow-exporter@enp2s0.service
+    return units
+
+# --------------------------- route -----------------------------------
 @router.get("/summary", response_class=JSONResponse)
 def summary():
     hostname = socket.gethostname()
@@ -81,18 +103,27 @@ def summary():
     disk = _disk_usage("/")
     addrs = _ip_addresses()
 
-    # Aggiunti i servizi richiesti, preservando quelli esistenti
+    # Base + nuovi servizi/timer + php-fpm dinamico
     services_to_check = [
-        "netprobe-api",            # API (socket-activated)
-        "apache2",                 # Web
+        "netprobe-api",              # API (service, anche se socket-activated)
+        #"netprobe-api.socket",       # API (socket)
+        "apache2",
         "smokeping",
         "systemd-timesyncd",
-        "cron",                    # NEW
-        "mariadb",                 # NEW
-        "netprobe-flow-collector", # NEW
-        "softflowd",               # NEW
+        "cron",
+        "mariadb",
+        "netprobe-flow-collector",
+        "softflowd",
+        "netprobe-alertd.timer",
+        "netprobe-speedtestd.timer",
+        _php_fpm_unit(),
     ]
     services = _service_status(services_to_check)
+
+    # istanze exporter@ se presenti
+    for u in _exporter_instances():
+        services.update(_service_status([u]))
+
     dumpcap = _dumpcap_caps()
 
     return {

@@ -99,7 +99,7 @@ chmod +x /usr/local/bin/dcompose
 # =====================================================================
 step "Creo utente/gruppo ${APP_USER}"
 getent group  "${APP_GROUP}" >/dev/null || groupadd -r "${APP_GROUP}"
-id -u "${APP_USER}" >/dev/null 2>&1 || useradd -r -g "${APP_GROUP}" -d "${APP_DIR}" -s /usr/sbin/nologin "${APP_USER}"
+id -u "${APP_USER}" >/devnull 2>&1 || useradd -r -g "${APP_GROUP}" -d "${APP_DIR}" -s /usr/sbin/nologin "${APP_USER}"
 
 step "Sorgenti app in ${APP_DIR}"
 install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" "${APP_DIR}"
@@ -476,8 +476,8 @@ else
   echo "ATTENZIONE: /etc/cron.d/cacti mancante o senza poller.php (il pacchetto dovrebbe fornirlo)."
 fi
 
-# (opzionale) prima esecuzione del poller
-sudo -u www-data -- php /usr/share/cacti/site/poller.php -force || true
+# (opzionale) prima esecuzione del poller (flag corretto)
+sudo -u www-data -- php /usr/share/cacti/site/poller.php --force || true
 
 # =====================================================================
 # GRAYLOG (Docker stack)
@@ -510,14 +510,17 @@ EOF
   chmod 0640 "${ENV_FILE}"
 fi
 
-if [[ ! -s "${GL_DIR}/docker-compose.yml" ]]; then
-  cat > "${GL_DIR}/docker-compose.yml" <<'YAML'
+# Sempre backup + sovrascrittura del compose (evita vecchie 'condition:' che rompono dcompose)
+if [[ -s "${GL_DIR}/docker-compose.yml" ]]; then
+  cp -a "${GL_DIR}/docker-compose.yml" "${GL_DIR}/docker-compose.yml.bak.$(date +%F_%H%M%S)" || true
+fi
+cat > "${GL_DIR}/docker-compose.yml" <<'YAML'
 services:
   mongodb:
     image: mongo:6
     restart: unless-stopped
     healthcheck:
-      test: ["CMD","mongosh","--eval","db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ ping: 1 })"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -526,45 +529,64 @@ services:
 
   opensearch:
     image: opensearchproject/opensearch:2.11.0
+    restart: unless-stopped
     environment:
-      - discovery.type=single-node
-      - plugins.security.disabled=true
-      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+      discovery.type: single-node
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
     ulimits:
       memlock: { soft: -1, hard: -1 }
       nofile:  { soft: 65536, hard: 65536 }
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD","curl","-sSf","http://localhost:9200/_cluster/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
     ports:
       - "127.0.0.1:9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200 >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
     volumes:
       - os_data:/usr/share/opensearch/data
 
   graylog:
     image: graylog/graylog:6.0
+    restart: unless-stopped
     depends_on:
       - mongodb
       - opensearch
-    restart: unless-stopped
+
+    # UI solo in localhost: Apache fa da reverse proxy su /graylog/
+    ports:
+      - "127.0.0.1:9001:9000"
+      # Input syslog opzionali:
+      - "0.0.0.0:5514:1514/tcp"
+      - "0.0.0.0:5514:1514/udp"
+
     environment:
+      - TZ=CEST
       - GRAYLOG_PASSWORD_SECRET=${GRAYLOG_PASSWORD_SECRET}
       - GRAYLOG_ROOT_PASSWORD_SHA2=${GRAYLOG_ROOT_PASSWORD_SHA2}
       - GRAYLOG_ROOT_USERNAME=admin
-      - GRAYLOG_HTTP_PUBLISH_URI=http://0.0.0.0:9000/
+
+      # Bind interno + URL esterno dietro Apache
+      - GRAYLOG_HTTP_BIND_ADDRESS=0.0.0.0:9000
       - GRAYLOG_HTTP_EXTERNAL_URI=${GRAYLOG_HTTP_EXTERNAL_URI}
+
+      # Collegamenti espliciti a backend
+      - GRAYLOG_OPENSEARCH_HOSTS=http://opensearch:9200
+      - GRAYLOG_ELASTICSEARCH_HOSTS=http://opensearch:9200
+      - GRAYLOG_MONGODB_URI=mongodb://mongodb:27017/graylog
+
+      # extra
+      - GRAYLOG_HTTP_ENABLE_CORS=true
+      - GRAYLOG_HTTP_ENABLE_GZIP=true
+
+    # health morbido: durante il bootstrap l'API potrebbe non rispondere
     healthcheck:
-      test: ["CMD","curl","-sSf","http://localhost:9000/api/system/lbstatus"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9000/ >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
-    ports:
-      - "127.0.0.1:9001:9000"
-      - "0.0.0.0:5514:1514/tcp"
-      - "0.0.0.0:5514:1514/udp"
+
     volumes:
       - gl_data:/usr/share/graylog/data
 
@@ -573,8 +595,7 @@ volumes:
   os_data: {}
   gl_data: {}
 YAML
-  chown ${APP_USER}:${APP_GROUP} "${GL_DIR}/docker-compose.yml"
-fi
+chown ${APP_USER}:${APP_GROUP} "${GL_DIR}/docker-compose.yml"
 
 # systemd unit (usa il wrapper dcompose)
 if [[ ! -s /etc/systemd/system/graylog-stack.service ]]; then
@@ -598,7 +619,12 @@ EOF
 fi
 
 systemctl daemon-reload
-systemctl enable --now graylog-stack.service
+systemctl enable --now graylog-stack.service || true
+# in caso di primo avvio con pull, prova un retry
+if ! systemctl is-active --quiet graylog-stack.service; then
+  sleep 2
+  systemctl start graylog-stack.service || true
+fi
 
 # =====================================================================
 # SPEEDTEST CLI (Ookla) opzionale

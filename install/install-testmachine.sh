@@ -293,16 +293,16 @@ cat >/etc/apache2/sites-available/testmachine.conf <<EOF
   # App dietro proxy in HTTP ? NON segnare come https (evita cookie Secure su HTTP)
   RequestHeader set X-Forwarded-Proto "http"
 
+    # --- Esclusioni prima del catch-all ---
+  ProxyPass /smokeping/ !
+  ProxyPass /cgi-bin/   !
+  ProxyPass /cacti/     !
+  
   # --- WebSocket verso FastAPI (app principale) ---
   ProxyPass        /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
   ProxyPassReverse /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
   ProxyPass        /shell/ws ws://127.0.0.1:${API_PORT}/shell/ws
   ProxyPassReverse /shell/ws ws://127.0.0.1:${API_PORT}/shell/ws
-
-  # --- Esclusioni prima del catch-all ---
-  ProxyPass /smokeping/ !
-  ProxyPass /cgi-bin/   !
-  ProxyPass /cacti/     !
 
   # --- Graylog su /graylog (PRIMA del catch-all) ---
   # Aiuta Graylog con URL assoluti quando sta sotto un sottopercorso

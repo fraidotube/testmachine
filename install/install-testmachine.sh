@@ -281,36 +281,44 @@ grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf 
 step "Site testmachine.conf (API/WS + Graylog + esclusioni /smokeping /cgi-bin /cacti)"
 cat >/etc/apache2/sites-available/testmachine.conf <<EOF
 <VirtualHost *:${WEB_PORT}>
-  ServerName testmachine
+  ServerName testmachine.local
   ErrorLog  /var/log/apache2/testmachine-error.log
   CustomLog /var/log/apache2/testmachine-access.log combined
 
   ProxyPreserveHost On
   ProxyRequests Off
-  RequestHeader set X-Forwarded-Proto "http"
   ProxyTimeout 120
+  AllowEncodedSlashes NoDecode
 
-  # WebSocket verso l'app FastAPI
+  # App dietro proxy in HTTP ? NON segnare come https (evita cookie Secure su HTTP)
+  RequestHeader set X-Forwarded-Proto "http"
+
+  # --- WebSocket verso FastAPI (app principale) ---
   ProxyPass        /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
   ProxyPassReverse /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
   ProxyPass        /shell/ws ws://127.0.0.1:${API_PORT}/shell/ws
   ProxyPassReverse /shell/ws ws://127.0.0.1:${API_PORT}/shell/ws
 
-  # Non proxy verso l'app
+  # --- Esclusioni prima del catch-all ---
   ProxyPass /smokeping/ !
   ProxyPass /cgi-bin/   !
   ProxyPass /cacti/     !
 
-  # Graylog pubblicato su sottopercorso /graylog/
+  # --- Graylog su /graylog (PRIMA del catch-all) ---
+  # Aiuta Graylog con URL assoluti quando sta sotto un sottopercorso
+  RequestHeader set X-Graylog-Server-URL "http://%{HTTP_HOST}s/graylog/"
+
+  <Location "/graylog/">
+    ProxyPassReverseCookiePath / /graylog/
+  </Location>
   ProxyPass        /graylog/        http://127.0.0.1:9001/
   ProxyPassReverse /graylog/        http://127.0.0.1:9001/
   ProxyPass        /graylog/api/ws  ws://127.0.0.1:9001/api/ws
   ProxyPassReverse /graylog/api/ws  ws://127.0.0.1:9001/api/ws
-  ProxyPassReverseCookiePath / /graylog/
 
-  # App FastAPI (default)
-  ProxyPass        / http://127.0.0.1:${API_PORT}/
-  ProxyPassReverse / http://127.0.0.1:${API_PORT}/
+  # --- App FastAPI (catch-all) ---
+  ProxyPass        /  http://127.0.0.1:${API_PORT}/
+  ProxyPassReverse /  http://127.0.0.1:${API_PORT}/
 </VirtualHost>
 EOF
 a2ensite testmachine.conf >/dev/null || true

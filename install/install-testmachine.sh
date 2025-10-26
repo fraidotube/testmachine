@@ -361,17 +361,22 @@ Cmnd_Alias NP_SVC = \
   /bin/systemctl restart netprobe-api.service,     /usr/bin/systemctl restart netprobe-api.service
 Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
 Cmnd_Alias NP_NM   = /usr/bin/nmcli *
-Cmnd_Alias NP_IPT  = \
-  /usr/sbin/iptables -t mangle -S, \
-  /usr/sbin/iptables -t mangle -A FORWARD -o *, \
-  /usr/sbin/iptables -t mangle -D FORWARD -o *
+# Lettura sicura password DB Cacti dalla UI
 Cmnd_Alias NP_CACTI = /usr/bin/cat /etc/cacti/debian.php, /bin/cat /etc/cacti/debian.php
+# Esecuzione installer da UI (entrambe le posizioni)
 Cmnd_Alias NP_UPDATE = \
   /usr/bin/env DEBIAN_FRONTEND=noninteractive /opt/netprobe/install-testmachine.sh *, \
   /bin/bash /opt/netprobe/install-testmachine.sh *, \
   /usr/bin/env DEBIAN_FRONTEND=noninteractive /opt/netprobe/install/install-testmachine.sh *, \
   /bin/bash /opt/netprobe/install/install-testmachine.sh *
-netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_IPT, NP_CACTI, NP_UPDATE
+# Power (reboot/shutdown) + systemd-run per reboot pianificato
+Cmnd_Alias NP_POWER = \
+  /sbin/reboot, /usr/sbin/reboot, \
+  /bin/systemctl reboot, /usr/bin/systemctl reboot, \
+  /usr/sbin/shutdown -r now *, /usr/sbin/shutdown -r +* *, \
+  /bin/systemd-run *, /usr/bin/systemd-run *
+netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI, NP_UPDATE, NP_POWER
+
 EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -cf /etc/sudoers.d/netprobe-ops || { echo "Errore in /etc/sudoers.d/netprobe-ops"; exit 1; }

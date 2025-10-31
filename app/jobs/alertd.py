@@ -13,7 +13,7 @@ STATE      = Path("/var/lib/netprobe/tmp/alertd.state.json")
 AUDIT      = Path("/var/lib/netprobe/logs/audit.jsonl")
 SPEED_HIST = Path("/var/lib/netprobe/speedtest/history.jsonl")
 SP_DB      = Path("/etc/smokeping/config.d/Database")
-DBG        = Path("/var/lib/netprobe/tmp/alertd.debug")  # debug leggero
+DBG        = Path("/var/lib/netprobe/tmp/alertd.debug")
 
 def _d(msg:str):
     try:
@@ -177,44 +177,33 @@ def check_auth(cfg, last_ts:int)->tuple[list[tuple[str,str]], int]:
         return [("auth:fail", f"Tentativi login falliti: {len(fails)} negli ultimi {cfg.get('window_min',5)} min (IP: {ipset})")], newest
     return [], newest
 
-# ===== Nuovo: LAN Watch DHCP =====
-def _tail_jsonl(path:Path, max_bytes:int=200_000)->list[dict]:
-    if not path.exists(): return []
-    size = path.stat().st_size
-    with open(path, "rb") as f:
-        if size > max_bytes:
-            f.seek(size - max_bytes)
-            f.readline()
-        data = f.read().decode("utf-8", "ignore")
-    out=[]
-    for ln in data.splitlines():
-        ln=ln.strip()
-        if not ln: continue
-        try: out.append(json.loads(ln))
-        except Exception: pass
-    return out
-
-def check_lanwatch_dhcp(checks)->list[tuple[str,str]]:
-    lw = checks.get("lanwatch",{}) if isinstance(checks.get("lanwatch"), dict) else {}
-    if not lw.get("enabled", True) or not lw.get("dhcp_enabled", False):
+# ===== Nuovo: DHCPSentinel =====
+def check_dhcpsentinel(checks:dict)->list[tuple[str,str]]:
+    d = checks.get("dhcpsentinel")
+    if not isinstance(d, dict) or not d.get("enabled"):
         return []
-    logf = Path(lw.get("dhcp_log") or "/var/lib/netprobe/lanwatch/dhcp.jsonl")
-    win  = int(lw.get("window_min", 10))
-    now  = int(time.time())
-    recent = _tail_jsonl(logf)
-    alerts=[]
-    for ev in recent:
-        try:
-            if ev.get("type") == "dhcp_offer" and not ev.get("allowed", True):
-                ts = int(ev.get("ts", 0))
-                if ts and (now - ts) <= win*60:
-                    sip = ev.get("server_ip","?")
-                    iface = ev.get("iface","?")
-                    alerts.append(("lanwatch:rogue_dhcp", f"Rogue DHCP su {iface}: server {sip} (non in allow/gateway)"))
-                    break
-        except Exception:
-            pass
-    return alerts
+    last_path = Path(d.get("last_path") or "/var/lib/netprobe/dhcpsentinel/last.json")
+    win_min   = int(d.get("window_min", 10))
+    try:
+        last = json.loads(last_path.read_text("utf-8"))
+    except Exception:
+        return []
+    ts = int(last.get("ts", 0))
+    if not ts or (time.time() - ts) > win_min*60:
+        return []
+    ok  = bool(last.get("ok", True))
+    if ok:
+        return []
+    iface  = last.get("iface", "?")
+    seen   = ", ".join(last.get("seen", []) or ["?"])
+    reason = str(last.get("reason", "unknown"))
+    if reason == "allowlist_empty":
+        msg = f"dhcpsentinel: DHCP server rilevato su {iface}: {seen} (allowlist vuota)"
+    elif reason == "rogue":
+        msg = f"dhcpsentinel: ROGUE DHCP su {iface}: {seen} (non in allow)"
+    else:
+        msg = f"dhcpsentinel: anomalia su {iface}: {seen} (reason={reason})"
+    return [("dhcpsentinel:rogue", msg)]
 
 # ===== Notifica =====
 def _send_telegram(cfg:dict, text:str):
@@ -254,29 +243,22 @@ def main():
     alerts=[]
 
     checks = cfg.get("checks", {})
-    # checks (tolleranti)
-    if isinstance(checks.get("disk"), dict) and checks["disk"].get("enabled"):
-        alerts += check_disk(checks["disk"])
-    if isinstance(checks.get("services"), dict) and checks["services"].get("enabled"):
-        alerts += check_services(checks["services"])
-    if isinstance(checks.get("flow"), dict) and checks["flow"].get("enabled"):
-        alerts += check_flow(checks["flow"])
-    if isinstance(checks.get("cacti"), dict) and checks["cacti"].get("enabled"):
-        alerts += check_cacti(checks["cacti"])
-    if isinstance(checks.get("smokeping"), dict) and checks["smokeping"].get("enabled"):
-        alerts += check_smokeping(checks["smokeping"])
-    if isinstance(checks.get("speedtest"), dict) and checks["speedtest"].get("enabled"):
-        alerts += check_speedtest(checks["speedtest"])
+    if isinstance(checks.get("disk"), dict) and checks["disk"].get("enabled"): alerts += check_disk(checks["disk"])
+    if isinstance(checks.get("services"), dict) and checks["services"].get("enabled"): alerts += check_services(checks["services"])
+    if isinstance(checks.get("flow"), dict) and checks["flow"].get("enabled"): alerts += check_flow(checks["flow"])
+    if isinstance(checks.get("cacti"), dict) and checks["cacti"].get("enabled"): alerts += check_cacti(checks["cacti"])
+    if isinstance(checks.get("smokeping"), dict) and checks["smokeping"].get("enabled"): alerts += check_smokeping(checks["smokeping"])
+    if isinstance(checks.get("speedtest"), dict) and checks["speedtest"].get("enabled"): alerts += check_speedtest(checks["speedtest"])
     if isinstance(checks.get("auth"), dict) and checks["auth"].get("enabled"):
         extra, newest = check_auth(checks["auth"], int(st.get("last_audit_ts",0)))
         alerts += extra
         st["last_audit_ts"] = newest
 
-    # nuovo: LAN Watch DHCP
+    # Nuovo: DHCPSentinel
     try:
-        alerts += check_lanwatch_dhcp(checks)
+        alerts += check_dhcpsentinel(checks)
     except Exception as e:
-        _d(f"lanwatch error: {e!r}")
+        _d(f"dhcpsentinel error: {e!r}")
 
     _d(f"alerts found: {alerts}")
 

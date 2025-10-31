@@ -255,6 +255,7 @@ code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mo
 .card--alerts{    background: linear-gradient(160deg, rgba(180, 60, 165, .30), rgba(180, 60, 165, .82)) !important; border-color: rgba(180, 60, 165, .42) !important; }
 .card--nat{       background: linear-gradient(160deg, rgba(23,100,100,0.25), rgba(100,0,0,.80)) !important; border: 1px solid rgba(255,255,255,.35); !important; }
 .card--graylog{   background: linear-gradient(160deg, rgba(123,00,100,0.25), rgba(100,150,0,.80)) !important; border: 1px solid rgba(255,255,255,.35); !important; }
+.card--dhcpsentinel{   background: linear-gradient(160deg, rgba(50,50,100,0.25), rgba(0,150,50,.80)) !important; border: 1px solid rgba(255,255,255,.35); !important; }
 
 /* ---------------- Servizi (home) ---------------- */
 .hr-thin{

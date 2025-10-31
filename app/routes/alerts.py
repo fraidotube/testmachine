@@ -8,6 +8,7 @@ import json, time, re
 
 from routes.auth import verify_session_cookie, _load_users
 from util.audit import log_event
+from util.notify import send_telegram
 
 router = APIRouter(tags=["alerts"])
 
@@ -22,13 +23,16 @@ DEFAULT_CFG = {
     "email":    {"enabled": False, "smtp": "localhost", "from": "testmachine@localhost", "to": []}
   },
   "checks": {
-    "services":  {"enabled": True, "list": ["netprobe-api.socket","apache2","smokeping","netprobe-flow-collector","cron","mariadb"]},
-    "disk":      {"enabled": True, "paths": ["/","/var"], "warn_pct": 90},
-    "smokeping": {"enabled": True, "rrd_fresh_min": 10, "database_file": "/etc/smokeping/config.d/Database"},
-    "cacti":     {"enabled": True, "url": "", "log_dir": "/usr/share/cacti/site/log", "log_stale_min": 10},
-    "speedtest": {"enabled": True, "down_min_mbps": 50, "up_min_mbps": 10, "ping_max_ms": 80},
-    "flow":      {"enabled": True, "dir": "/var/lib/netprobe/flows", "stale_min": 10},
-    "auth":      {"enabled": True, "fail_threshold": 3, "window_min": 5}
+    "services":      {"enabled": True, "list": ["netprobe-api.socket","apache2","smokeping","netprobe-flow-collector","cron","mariadb"]},
+    "disk":          {"enabled": True, "paths": ["/","/var"], "warn_pct": 90},
+    "smokeping":     {"enabled": True, "rrd_fresh_min": 10, "database_file": "/etc/smokeping/config.d/Database"},
+    "cacti":         {"enabled": True, "url": "", "log_dir": "/usr/share/cacti/site/log", "log_stale_min": 10},
+    "speedtest":     {"enabled": True, "down_min_mbps": 50, "up_min_mbps": 10, "ping_max_ms": 80},
+    "flow":          {"enabled": True, "dir": "/var/lib/netprobe/flows", "stale_min": 10},
+    "auth":          {"enabled": True, "fail_threshold": 3, "window_min": 5},
+    # nuovo: DHCP Sentinel
+    "dhcpsentinel":  {"enabled": False, "events": "/var/lib/netprobe/dhcpsentinel/events.jsonl",
+                      "window_min": 10}
   },
   "throttle_min": 30,
   "silence_until": 0
@@ -54,9 +58,6 @@ def _ensure_cfg()->dict:
                 cfg["checks"][k].setdefault(kk, vv)
         cfg.setdefault("throttle_min",  DEFAULT_CFG["throttle_min"])
         cfg.setdefault("silence_until", DEFAULT_CFG["silence_until"])
-        # se esistono residui "lanwatch", eliminali per pulizia
-        if "lanwatch" in cfg["checks"]:
-            cfg["checks"].pop("lanwatch", None)
         return cfg
     except Exception:
         return DEFAULT_CFG.copy()
@@ -82,7 +83,6 @@ def _head(title:str)->str:
             "<div class='spacer'><a class='btn secondary' href='/'>Home</a></div>"
             "</div>")
 
-# Base URL dinamica per i check HTTP
 def _http_base()->str:
     try:
         s = json.loads(SETTINGS_JS.read_text("utf-8"))
@@ -125,7 +125,7 @@ def alerts_page(request: Request):
         <label>Token</label><input name='tg_token' value='{escape(tg.get('token',''))}' style='min-width:320px'/>
         <label>Chat ID</label><input name='tg_chat' value='{escape(str(tg.get('chat_id','')))}' style='min-width:200px'/>
         <label class='row' style='gap:6px;align-items:center'><input type='checkbox' name='tg_enabled' {'checked' if tg.get('enabled') else ''}/> Abilitato</label>
-        <button class='btn secondary' formaction='/alerts/test' formmethod='post'>Invia test</button>
+        <button class='btn secondary' formaction='/alerts/test' formmethod='post' type='submit'>Invia test</button>
       </div>
 
       <h3>Controlli</h3>
@@ -137,6 +137,7 @@ def alerts_page(request: Request):
         <label class='row' style='gap:6px'><input type='checkbox' name='chk_speed' {'checked' if cfg['checks']['speedtest']['enabled'] else ''}/> Speedtest soglie</label>
         <label class='row' style='gap:6px'><input type='checkbox' name='chk_flow' {'checked' if cfg['checks']['flow']['enabled'] else ''}/> Flussi</label>
         <label class='row' style='gap:6px'><input type='checkbox' name='chk_auth' {'checked' if cfg['checks']['auth']['enabled'] else ''}/> Accesso UI</label>
+        <label class='row' style='gap:6px'><input type='checkbox' name='chk_dhcps' {'checked' if cfg['checks']['dhcpsentinel']['enabled'] else ''}/> DHCPSentinel</label>
       </div>
 
       <h4>Servizi monitorati</h4>
@@ -191,7 +192,7 @@ def alerts_save(request: Request,
     tg_token: str = Form(""), tg_chat: str = Form(""), tg_enabled: str | None = Form(None),
     chk_services: str | None = Form(None), chk_disk: str | None = Form(None), chk_smoke: str | None = Form(None),
     chk_speed: str | None = Form(None), chk_cacti: str | None = Form(None), chk_flow: str | None = Form(None),
-    chk_auth: str | None = Form(None),
+    chk_auth: str | None = Form(None), chk_dhcps: str | None = Form(None),
     services: str = Form(""), disk_pct: int = Form(90),
     spd_down: int = Form(50), spd_up: int = Form(10), spd_ping: int = Form(80),
     flow_stale: int = Form(10), sp_rrd: int = Form(10), cacti_stale: int = Form(10),
@@ -205,13 +206,14 @@ def alerts_save(request: Request,
 
     cfg["channels"]["telegram"].update({"enabled": bool(tg_enabled), "token": tg_token.strip(), "chat_id": tg_chat.strip()})
 
-    cfg["checks"]["services"]["enabled"] = bool(chk_services)
-    cfg["checks"]["disk"]["enabled"]     = bool(chk_disk)
-    cfg["checks"]["smokeping"]["enabled"]= bool(chk_smoke)
-    cfg["checks"]["speedtest"]["enabled"]= bool(chk_speed)
-    cfg["checks"]["cacti"]["enabled"]    = bool(chk_cacti)
-    cfg["checks"]["flow"]["enabled"]     = bool(chk_flow)
-    cfg["checks"]["auth"]["enabled"]     = bool(chk_auth)
+    cfg["checks"]["services"]["enabled"]   = bool(chk_services)
+    cfg["checks"]["disk"]["enabled"]       = bool(chk_disk)
+    cfg["checks"]["smokeping"]["enabled"]  = bool(chk_smoke)
+    cfg["checks"]["speedtest"]["enabled"]  = bool(chk_speed)
+    cfg["checks"]["cacti"]["enabled"]      = bool(chk_cacti)
+    cfg["checks"]["flow"]["enabled"]       = bool(chk_flow)
+    cfg["checks"]["auth"]["enabled"]       = bool(chk_auth)
+    cfg["checks"]["dhcpsentinel"]["enabled"]= bool(chk_dhcps)
 
     cfg["checks"]["services"]["list"] = [s.strip() for s in services.splitlines() if s.strip()]
     cfg["checks"]["disk"]["warn_pct"] = int(disk_pct)
@@ -252,11 +254,11 @@ def alerts_reset(request: Request):
 def alerts_get():
     return JSONResponse(_ensure_cfg())
 
-@router.post("/alerts/test", response_class=HTMLResponse)
+# FIX: accetta sia POST che GET per il test
+@router.api_route("/alerts/test", methods=["GET","POST"], response_class=HTMLResponse)
 def alerts_test(request: Request):
     if not _require_admin(request):
         return HTMLResponse("Accesso negato", status_code=403)
-    from util.notify import send_telegram
     cfg = _ensure_cfg()
     tg = cfg["channels"]["telegram"]
     ok, msg = send_telegram(tg.get("token",""), str(tg.get("chat_id","")), f"TestMachine: test notifica {int(time.time())}")

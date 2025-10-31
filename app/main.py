@@ -19,7 +19,7 @@ from routes.shell import router as shell_router
 from routes.alerts import router as alerts_router
 from routes import bg
 from routes.natfw import router as natfw_router
-
+from routes import dhcpsentinel
 
 
 # Auth
@@ -53,6 +53,7 @@ PATH_ROLES = {
     "/cacti": ["admin", "operator", "viewer"],
     "/shell": ["admin"],
     "/alerts": ["admin"],
+
 
 }
 
@@ -120,6 +121,8 @@ app.include_router(shell_router)
 app.include_router(alerts_router)
 app.include_router(bg.router)
 app.include_router(natfw_router)
+app.include_router(dhcpsentinel.router)
+
 
 
 # ---- NUOVO: endpoint per leggere la password DB di Cacti (solo admin via RBAC) ----

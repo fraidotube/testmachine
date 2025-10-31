@@ -1,4 +1,3 @@
-# /opt/netprobe/app/routes/alerts.py
 from __future__ import annotations
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -17,6 +16,9 @@ STATE_FILE  = Path("/var/lib/netprobe/tmp/alertd.state.json")
 SETTINGS_JS = Path("/etc/netprobe/settings.json")  # {"web_port": 8080}
 
 DEFAULT_CFG = {
+  # Etichetta macchina (usata come “mittente”/prefisso dei messaggi)
+  "label": "TestMachine",
+
   "channels": {
     "telegram": {"enabled": False, "token": "", "chat_id": ""},
     "slack":    {"enabled": False, "webhook_url": ""},
@@ -44,6 +46,9 @@ def _ensure_cfg()->dict:
         CFG_FILE.write_text(json.dumps(DEFAULT_CFG, indent=2), encoding="utf-8")
     try:
         cfg = json.loads(CFG_FILE.read_text("utf-8") or "{}")
+        # merge top-level defaults
+        cfg.setdefault("label", DEFAULT_CFG["label"])
+
         # merge channels
         cfg.setdefault("channels", {})
         for k,v in DEFAULT_CFG["channels"].items():
@@ -107,6 +112,7 @@ def alerts_page(request: Request):
     sv  = cfg["checks"]["services"]["list"]
     services_text = "\n".join(sv)
     base_hint = _http_base()
+    label = str(cfg.get("label","TestMachine"))
 
     html = _head("Alerting") + f"""
 <div class='grid'>
@@ -120,6 +126,14 @@ def alerts_page(request: Request):
     </div>
 
     <form method='post' action='/alerts/config'>
+
+      <h3>Identità</h3>
+      <div class='row' style='gap:8px;flex-wrap:wrap'>
+        <label>Etichetta / Mittente</label>
+        <input name='label' value='{escape(label)}' maxlength='64' style='min-width:280px' />
+        <span class='muted'>Comparirà come prefisso nei messaggi (es. "⚠️ <b>{escape(label)}</b> Alerts").</span>
+      </div>
+
       <h3>Telegram</h3>
       <div class='row' style='gap:8px;flex-wrap:wrap'>
         <label>Token</label><input name='tg_token' value='{escape(tg.get('token',''))}' style='min-width:320px'/>
@@ -189,7 +203,13 @@ def alerts_page(request: Request):
 
 @router.post("/alerts/config")
 def alerts_save(request: Request,
+    # Identità
+    label: str = Form(""),
+
+    # Telegram
     tg_token: str = Form(""), tg_chat: str = Form(""), tg_enabled: str | None = Form(None),
+
+    # Checks
     chk_services: str | None = Form(None), chk_disk: str | None = Form(None), chk_smoke: str | None = Form(None),
     chk_speed: str | None = Form(None), chk_cacti: str | None = Form(None), chk_flow: str | None = Form(None),
     chk_auth: str | None = Form(None), chk_dhcps: str | None = Form(None),
@@ -197,15 +217,26 @@ def alerts_save(request: Request,
     spd_down: int = Form(50), spd_up: int = Form(10), spd_ping: int = Form(80),
     flow_stale: int = Form(10), sp_rrd: int = Form(10), cacti_stale: int = Form(10),
     auth_threshold: int = Form(3), auth_window: int = Form(5),
-    thr_min: int = Form(30),
-    silence: int = Form(0),
+
+    # Notifiche
+    thr_min: int = Form(30), silence: int = Form(0),
 ):
     if not _require_admin(request):
         return HTMLResponse("Accesso negato", status_code=403)
     cfg = _ensure_cfg()
 
+    # Sanitize e salva etichetta
+    lbl = (label or "").strip()
+    if not lbl:
+        lbl = "TestMachine"
+    if len(lbl) > 64:
+        lbl = lbl[:64]
+    cfg["label"] = lbl
+
+    # Canale Telegram
     cfg["channels"]["telegram"].update({"enabled": bool(tg_enabled), "token": tg_token.strip(), "chat_id": tg_chat.strip()})
 
+    # Flags check
     cfg["checks"]["services"]["enabled"]   = bool(chk_services)
     cfg["checks"]["disk"]["enabled"]       = bool(chk_disk)
     cfg["checks"]["smokeping"]["enabled"]  = bool(chk_smoke)
@@ -215,6 +246,7 @@ def alerts_save(request: Request,
     cfg["checks"]["auth"]["enabled"]       = bool(chk_auth)
     cfg["checks"]["dhcpsentinel"]["enabled"]= bool(chk_dhcps)
 
+    # Parametri check
     cfg["checks"]["services"]["list"] = [s.strip() for s in services.splitlines() if s.strip()]
     cfg["checks"]["disk"]["warn_pct"] = int(disk_pct)
     cfg["checks"]["speedtest"]["down_min_mbps"] = int(spd_down)
@@ -261,6 +293,7 @@ def alerts_test(request: Request):
         return HTMLResponse("Accesso negato", status_code=403)
     cfg = _ensure_cfg()
     tg = cfg["channels"]["telegram"]
-    ok, msg = send_telegram(tg.get("token",""), str(tg.get("chat_id","")), f"TestMachine: test notifica {int(time.time())}")
+    label = str(cfg.get("label","TestMachine")).strip() or "TestMachine"
+    ok, msg = send_telegram(tg.get("token",""), str(tg.get("chat_id","")), f"🔔 {label}: test notifica {int(time.time())}")
     note = "OK" if ok else ("ERR: " + msg)
     return HTMLResponse(f"<script>alert('Telegram: {escape(note)}');history.back();</script>")

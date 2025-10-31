@@ -1,4 +1,3 @@
-# /opt/netprobe/app/jobs/alertd.py
 from __future__ import annotations
 import os, re, json, time, shutil, subprocess, urllib.request, urllib.parse
 from pathlib import Path
@@ -274,8 +273,9 @@ def main():
     st["sent"]=sent
 
     if to_send:
-        text = "⚠️ TestMachine Alerts:\n" + "\n".join(f"- {m}" for _,m in to_send)
-        _d(f"sending: {to_send}")
+        label = str(cfg.get("label","TestMachine")).strip() or "TestMachine"
+        text = f"⚠️ {label} Alerts:\n" + "\n".join(f"- {m}" for _,m in to_send)
+        _d(f"sending: {to_send} as label={label!r}")
         _send_telegram(cfg, text)
     else:
         _d("nessun alert da inviare")

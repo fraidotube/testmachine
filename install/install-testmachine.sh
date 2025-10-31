@@ -254,62 +254,64 @@ EOF
 
   # ------------------ === DHCPSENTINEL === ------------------
   step "Systemd: DHCP Sentinel (service + timer)"
+
+  # service: replica della macchina funzionante
   cat > /etc/systemd/system/netprobe-dhcpsentinel.service <<'EOF'
 [Unit]
 Description=NetProbe DHCP Sentinel (one-shot)
+Wants=network-online.target
 After=network-online.target
 ConditionPathExists=/opt/netprobe/app/workers/dhcpsentinel.py
 
 [Service]
 Type=oneshot
-# Eseguiamo da root ma con hardening e capability minime per raw socket
-User=root
-Group=root
+User=netprobe
+Group=netprobe
 WorkingDirectory=/opt/netprobe/app
-Environment=PYTHONPATH=/opt/netprobe/app
-ExecStart=/opt/netprobe/venv/bin/python /opt/netprobe/app/workers/dhcpsentinel.py
-NoNewPrivileges=yes
-LockPersonality=yes
-PrivateTmp=yes
-ProtectHome=yes
-ProtectSystem=strict
-ReadWritePaths=/var/lib/netprobe/dhcpsentinel
-CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+ExecStart=/usr/bin/python3 /opt/netprobe/app/workers/dhcpsentinel.py
+# Capability minime per sniff/send tramite AF_PACKET
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=no
+# Hardening compatibile con scapy/raw socket
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=full
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-  # di default: sonda ogni 5 minuti (puoi cambiare in UI se previsto)
+  # timer: identico a quello usato nella macchina ok (2 minuti)
   cat > /etc/systemd/system/netprobe-dhcpsentinel.timer <<'EOF'
 [Unit]
-Description=Run NetProbe DHCP Sentinel every 5 minutes
+Description=Run NetProbe DHCP Sentinel periodically
+
 [Timer]
 OnBootSec=30s
-OnUnitActiveSec=5m
-AccuracySec=1s
+OnUnitActiveSec=120s
+AccuracySec=15s
 Unit=netprobe-dhcpsentinel.service
+
 [Install]
 WantedBy=timers.target
 EOF
 
-  step "systemctl daemon-reload & setup"
-  systemctl daemon-reload
-  command -v fuser >/dev/null 2>&1 && /usr/bin/fuser -k -n udp 2055 || true
-  pkill -f '(^| )nfcapd( |$)' 2>/dev/null || true
-  systemctl reset-failed netprobe-flow-collector 2>/dev/null || true
-  sleep 0.2
+  # sudoers dedicato (come macchina funzionante)
+  cat > /etc/sudoers.d/netprobe-dhcpsentinel <<'EOF'
+Cmnd_Alias NETPROBE_DHCP = /bin/systemctl start netprobe-dhcpsentinel.service
+netprobe ALL=(root) NOPASSWD: NETPROBE_DHCP
+EOF
+  chmod 0440 /etc/sudoers.d/netprobe-dhcpsentinel
+  visudo -cf /etc/sudoers.d/netprobe-dhcpsentinel >/dev/null || true
 
-  systemctl enable --now netprobe-api.socket
-  systemctl stop netprobe-api.service 2>/dev/null || true
-  systemctl enable --now netprobe-flow-collector || true
-  systemctl stop 'netprobe-flow-exporter@*' 2>/dev/null || true
-  for link in /etc/systemd/system/multi-user.target.wants/netprobe-flow-exporter@*.service; do
-    [[ -L "$link" ]] && systemctl disable "$(basename "$link")" || true
-  done
-  systemctl enable --now netprobe-alertd.timer
-  systemctl enable --now netprobe-speedtestd.timer
-  # === DHCPSENTINEL === abilita timer
-  systemctl enable --now netprobe-dhcpsentinel.timer
 }
 deploy_systemd
 
@@ -387,6 +389,8 @@ step "DHCP Sentinel: workdir e seed file"
 install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/dhcpsentinel
 [[ -f /var/lib/netprobe/dhcpsentinel/events.jsonl ]] || { : > /var/lib/netprobe/dhcpsentinel/events.jsonl; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/dhcpsentinel/events.jsonl; chmod 0660 /var/lib/netprobe/dhcpsentinel/events.jsonl; }
 [[ -f /var/lib/netprobe/dhcpsentinel/last.json   ]] || { echo '{}' > /var/lib/netprobe/dhcpsentinel/last.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/dhcpsentinel/last.json; chmod 0660 /var/lib/netprobe/dhcpsentinel/last.json; }
+[[ -f /var/lib/netprobe/dhcpsentinel/alerts.clear.ts ]] || { echo 0 > /var/lib/netprobe/dhcpsentinel/alerts.clear.ts; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/dhcpsentinel/alerts.clear.ts; chmod 0644 /var/lib/netprobe/dhcpsentinel/alerts.clear.ts; }
+
 
 step "Sudoers operazioni UI"
 cat >/etc/sudoers.d/netprobe-ops <<'EOF'

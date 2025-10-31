@@ -46,6 +46,8 @@ apt-get install -y --no-install-recommends \
 # Dipendenze extra per NAT/UPnP + MTU/MSS + traceroute
 apt-get install -y --no-install-recommends \
   iproute2 iputils-tracepath mtr-tiny miniupnpc iptables
+# === DHCPSENTINEL === scapy lato sistema (fallback a pip nel venv già previsto)
+apt-get install -y --no-install-recommends python3-scapy
 
 # opzionale: MIBs
 if candidate="$(apt-cache policy snmp-mibs-downloader 2>/dev/null | awk '/Candidate:/ {print $2}')"; then
@@ -115,7 +117,7 @@ python3 -m venv "${APP_DIR}/venv"
 if [[ -f "${APP_DIR}/requirements.txt" ]]; then
   "${APP_DIR}/venv/bin/pip" install -r "${APP_DIR}/requirements.txt"
 else
-  "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart speedtest-cli websockets wsproto
+  "${APP_DIR}/venv/bin/pip" install fastapi uvicorn jinja2 python-multipart speedtest-cli websockets wsproto scapy
 fi
 chown -R "${APP_USER}:${APP_GROUP}" "${APP_DIR}"
 
@@ -250,6 +252,46 @@ Unit=netprobe-speedtestd.service
 WantedBy=timers.target
 EOF
 
+  # ------------------ === DHCPSENTINEL === ------------------
+  step "Systemd: DHCP Sentinel (service + timer)"
+  cat > /etc/systemd/system/netprobe-dhcpsentinel.service <<'EOF'
+[Unit]
+Description=NetProbe DHCP Sentinel (one-shot)
+After=network-online.target
+ConditionPathExists=/opt/netprobe/app/workers/dhcpsentinel.py
+
+[Service]
+Type=oneshot
+# Eseguiamo da root ma con hardening e capability minime per raw socket
+User=root
+Group=root
+WorkingDirectory=/opt/netprobe/app
+Environment=PYTHONPATH=/opt/netprobe/app
+ExecStart=/opt/netprobe/venv/bin/python /opt/netprobe/app/workers/dhcpsentinel.py
+NoNewPrivileges=yes
+LockPersonality=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/netprobe/dhcpsentinel
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET
+EOF
+
+  # di default: sonda ogni 5 minuti (puoi cambiare in UI se previsto)
+  cat > /etc/systemd/system/netprobe-dhcpsentinel.timer <<'EOF'
+[Unit]
+Description=Run NetProbe DHCP Sentinel every 5 minutes
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5m
+AccuracySec=1s
+Unit=netprobe-dhcpsentinel.service
+[Install]
+WantedBy=timers.target
+EOF
+
   step "systemctl daemon-reload & setup"
   systemctl daemon-reload
   command -v fuser >/dev/null 2>&1 && /usr/bin/fuser -k -n udp 2055 || true
@@ -266,6 +308,8 @@ EOF
   done
   systemctl enable --now netprobe-alertd.timer
   systemctl enable --now netprobe-speedtestd.timer
+  # === DHCPSENTINEL === abilita timer
+  systemctl enable --now netprobe-dhcpsentinel.timer
 }
 deploy_systemd
 
@@ -338,6 +382,12 @@ install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/logs
 [[ -f /var/lib/netprobe/voip/index.json    ]] || { echo '{"calls":{}, "rtp_streams":[], "built_ts":0}' >/var/lib/netprobe/voip/index.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/voip/index.json; chmod 0660 /var/lib/netprobe/voip/index.json; }
 [[ -f /var/lib/netprobe/netmap/index.json  ]] || { echo '{"scans":[]}' >/var/lib/netprobe/netmap/index.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/netmap/index.json; chmod 0660 /var/lib/netprobe/netmap/index.json; }
 
+# === DHCPSENTINEL === workdir + seed file
+step "DHCP Sentinel: workdir e seed file"
+install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/dhcpsentinel
+[[ -f /var/lib/netprobe/dhcpsentinel/events.jsonl ]] || { : > /var/lib/netprobe/dhcpsentinel/events.jsonl; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/dhcpsentinel/events.jsonl; chmod 0660 /var/lib/netprobe/dhcpsentinel/events.jsonl; }
+[[ -f /var/lib/netprobe/dhcpsentinel/last.json   ]] || { echo '{}' > /var/lib/netprobe/dhcpsentinel/last.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/dhcpsentinel/last.json; chmod 0660 /var/lib/netprobe/dhcpsentinel/last.json; }
+
 step "Sudoers operazioni UI"
 cat >/etc/sudoers.d/netprobe-ops <<'EOF'
 Defaults:netprobe !requiretty
@@ -358,7 +408,8 @@ Cmnd_Alias NP_SVC = \
   /bin/systemctl start netprobe-flow-exporter@*,  /usr/bin/systemctl start netprobe-flow-exporter@*, \
   /bin/systemctl stop  netprobe-flow-exporter@*,  /usr/bin/systemctl stop  netprobe-flow-exporter@*, \
   /bin/systemctl restart netprobe-flow-exporter@*, /usr/bin/systemctl restart netprobe-flow-exporter@*, \
-  /bin/systemctl restart netprobe-api.service,     /usr/bin/systemctl restart netprobe-api.service
+  /bin/systemctl restart netprobe-api.service,     /usr/bin/systemctl restart netprobe-api.service, \
+  /bin/systemctl start netprobe-dhcpsentinel.service, /usr/bin/systemctl start netprobe-dhcpsentinel.service
 Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
 Cmnd_Alias NP_NM   = /usr/bin/nmcli *
 # Lettura sicura password DB Cacti dalla UI
@@ -657,6 +708,22 @@ EOF
   chmod 0660 /etc/netprobe/speedtest.json
 fi
 
+# === DHCPSENTINEL === seed config (idempotente)
+if [[ ! -s /etc/netprobe/dhcpsentinel.json ]]; then
+cat >/etc/netprobe/dhcpsentinel.json <<'EOF'
+{
+  "enabled": true,
+  "iface": "ens4",
+  "allow": [],
+  "listen_sec": 6,
+  "retries": 1,
+  "retry_delay_sec": 2
+}
+EOF
+  chown root:${APP_GROUP} /etc/netprobe/dhcpsentinel.json
+  chmod 0660 /etc/netprobe/dhcpsentinel.json
+fi
+
 # =====================================================================
 # RIAVVII & CHECK FINALI
 # =====================================================================
@@ -666,6 +733,7 @@ systemctl restart smokeping || true
 systemctl reload apache2 || systemctl restart apache2
 systemctl enable --now netprobe-alertd.timer  || true
 systemctl enable --now netprobe-speedtestd.timer || true
+systemctl enable --now netprobe-dhcpsentinel.timer || true
 
 step "Check finali"
 systemctl is-active --quiet netprobe-api.socket && echo "API socket OK"

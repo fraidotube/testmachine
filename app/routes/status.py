@@ -1,7 +1,6 @@
-# /opt/netprobe/app/routes/status.py
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-import subprocess, shutil, socket, time
+import subprocess, shutil, socket, time, re  # <-- aggiunto re
 
 router = APIRouter(prefix="/status", tags=["status"])
 
@@ -27,29 +26,37 @@ def _disk_usage(path:str="/"):
     except Exception:
         return {"total": None, "used": None, "free": None}
 
+def _is_docker_bridge(name:str)->bool:
+    # Escludi bridge Docker: "docker0", "dockerX" e "br-<hash>"
+    return bool(re.match(r"^(docker0|docker\d*|br\-)", name, flags=re.IGNORECASE))
+
 def _ip_addresses():
-    # IPv4 (coerente con la tua versione: IPv6 lasciato off per non cambiare comportamento)
+    # IPv4
     rc4, out4, _ = _run(["/usr/sbin/ip","-o","-4","addr","show","up"])
 
     data: dict[str, dict] = {}
     if rc4 == 0:
         for line in out4.splitlines():
-            # 2: eth0    inet 192.168.1.10/24 brd ... scope global ...
+            # 2: eth0    inet 192.168.1.10/24 ...
             parts = line.split()
             if len(parts) >= 4:
                 iface = parts[1]
+                if _is_docker_bridge(iface):
+                    continue  # <-- SKIP bridge Docker
                 addr  = parts[3]  # ip/mask
                 if iface not in data:
                     data[iface] = {"ipv4": [], "ipv6": []}
                 data[iface]["ipv4"].append(addr)
 
-    # # IPv6 (se un domani vuoi attivarlo)
+    # # IPv6 (eventuale futuro)
     # rc6, out6, _ = _run(["/usr/sbin/ip","-o","-6","addr","show","up"])
     # if rc6 == 0:
     #     for line in out6.splitlines():
     #         parts = line.split()
     #         if len(parts) >= 4:
     #             iface = parts[1]
+    #             if _is_docker_bridge(iface):
+    #                 continue
     #             addr  = parts[3]
     #             if iface not in data:
     #                 data[iface] = {"ipv4": [], "ipv6": []}
@@ -62,7 +69,6 @@ def _service_status(names:list[str]):
     for name in names:
         rc, out, _ = _run(["/bin/systemctl","is-active", name])
         state = (out.strip() if rc == 0 else "inactive")
-        # normalizza alcuni stati
         if state not in ("active","inactive","failed","activating","deactivating","reloading"):
             state = "inactive"
         res[name] = state
@@ -72,7 +78,6 @@ def _dumpcap_caps():
     rc, out, _ = _run(["/sbin/getcap","/usr/bin/dumpcap"])
     if rc == 0 and out.strip():
         return out.strip()
-    # fallback: se getcap non disponibile/errore
     return None
 
 # --------------------------- extra: nuovi servizi ---------------------
@@ -82,7 +87,6 @@ def _php_fpm_unit()->str:
     return f"php{ver}-fpm" if ver else "php-fpm"
 
 def _exporter_instances():
-    # elenca eventuali istanze netprobe-flow-exporter@*.service attive/failed
     rc, out, _ = _run([
         "/bin/systemctl","list-units","netprobe-flow-exporter@*.service",
         "--state=active,running,failed","--no-legend","--no-pager"
@@ -92,7 +96,7 @@ def _exporter_instances():
         for line in out.splitlines():
             parts = line.split()
             if parts:
-                units.append(parts[0])  # es. netprobe-flow-exporter@enp2s0.service
+                units.append(parts[0])
     return units
 
 # --------------------------- route -----------------------------------
@@ -103,10 +107,8 @@ def summary():
     disk = _disk_usage("/")
     addrs = _ip_addresses()
 
-    # Base + nuovi servizi/timer + php-fpm dinamico
     services_to_check = [
-        "netprobe-api",              # API (service, anche se socket-activated)
-        #"netprobe-api.socket",       # API (socket)
+        "netprobe-api",
         "apache2",
         "smokeping",
         "systemd-timesyncd",
@@ -120,7 +122,6 @@ def summary():
     ]
     services = _service_status(services_to_check)
 
-    # istanze exporter@ se presenti
     for u in _exporter_instances():
         services.update(_service_status([u]))
 

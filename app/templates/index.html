@@ -319,6 +319,11 @@
       return "<span class='pill'><span class='dot "+cls+"'></span>"+label+"</span>";
     }
 
+    function isHiddenIface(name){
+      // nascondi bridge docker: docker0 / dockerX / br-*
+      return /^(docker0|docker\d*|br\-)/i.test(name);
+    }
+
     async function refreshStatus(){
       try{
         const r = await fetch("/status/summary");
@@ -360,12 +365,12 @@
           }
         }
 
-        // interfacce/IP (escluso dockerX)
+        // interfacce/IP (ora esclude docker0/dockerX e br-*)
         const ifaces = js.interfaces || {};
         const ifEl = document.getElementById("ifaces");
         ifEl.innerHTML = "";
         const keys = Object.keys(ifaces)
-          .filter(k => !/^docker\d*$/i.test(k))
+          .filter(k => !isHiddenIface(k))
           .sort();
         if(keys.length===0){ ifEl.textContent="Nessuna interfaccia attiva"; }
         for (const k of keys){

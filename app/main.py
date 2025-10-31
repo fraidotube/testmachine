@@ -21,6 +21,7 @@ from routes import bg
 from routes.natfw import router as natfw_router
 
 
+
 # Auth
 from routes.auth import router as auth_router, verify_session_cookie, _load_users  # _load_users per leggere i ruoli
 
@@ -52,6 +53,7 @@ PATH_ROLES = {
     "/cacti": ["admin", "operator", "viewer"],
     "/shell": ["admin"],
     "/alerts": ["admin"],
+
 }
 
 # Percorsi sempre liberi
@@ -118,6 +120,7 @@ app.include_router(shell_router)
 app.include_router(alerts_router)
 app.include_router(bg.router)
 app.include_router(natfw_router)
+
 
 # ---- NUOVO: endpoint per leggere la password DB di Cacti (solo admin via RBAC) ----
 import re

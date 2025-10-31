@@ -4,15 +4,16 @@ from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from html import escape
 from pathlib import Path
-import json, time
+import json, time, re
 
 from routes.auth import verify_session_cookie, _load_users
 from util.audit import log_event
 
 router = APIRouter(tags=["alerts"])
 
-CFG_FILE  = Path("/etc/netprobe/alerts.json")
-STATE_FILE = Path("/var/lib/netprobe/tmp/alertd.state.json")
+CFG_FILE    = Path("/etc/netprobe/alerts.json")
+STATE_FILE  = Path("/var/lib/netprobe/tmp/alertd.state.json")
+SETTINGS_JS = Path("/etc/netprobe/settings.json")  # {"web_port": 8080}
 
 DEFAULT_CFG = {
   "channels": {
@@ -21,15 +22,14 @@ DEFAULT_CFG = {
     "email":    {"enabled": False, "smtp": "localhost", "from": "testmachine@localhost", "to": []}
   },
   "checks": {
-    "smokeping": {"enabled": True, "rrd_fresh_min": 10, "database_file": "/etc/smokeping/config.d/Database"},
+    "services":  {"enabled": True, "list": ["netprobe-api.socket","apache2","smokeping","netprobe-flow-collector","cron","mariadb"]},
     "disk":      {"enabled": True, "paths": ["/","/var"], "warn_pct": 90},
-    "services":  {"enabled": True, "list": ["netprobe-api.socket","apache2","smokeping","netprobe-flow-collector"]},
+    "smokeping": {"enabled": True, "rrd_fresh_min": 10, "database_file": "/etc/smokeping/config.d/Database"},
+    "cacti":     {"enabled": True, "url": "", "log_dir": "/usr/share/cacti/site/log", "log_stale_min": 10},
     "speedtest": {"enabled": True, "down_min_mbps": 50, "up_min_mbps": 10, "ping_max_ms": 80},
-    "cacti":     {"enabled": True, "url": "http://127.0.0.1:8080/cacti/", "log_dir": "/usr/share/cacti/site/log", "log_stale_min": 10},
     "flow":      {"enabled": True, "dir": "/var/lib/netprobe/flows", "stale_min": 10},
     "auth":      {"enabled": True, "fail_threshold": 3, "window_min": 5}
   },
-  # nuova opzione per ritmo reminder (minuti)
   "throttle_min": 30,
   "silence_until": 0
 }
@@ -40,8 +40,23 @@ def _ensure_cfg()->dict:
         CFG_FILE.write_text(json.dumps(DEFAULT_CFG, indent=2), encoding="utf-8")
     try:
         cfg = json.loads(CFG_FILE.read_text("utf-8") or "{}")
-        # merge minimo per nuove chiavi
-        if "throttle_min" not in cfg: cfg["throttle_min"] = DEFAULT_CFG["throttle_min"]
+        # merge channels
+        cfg.setdefault("channels", {})
+        for k,v in DEFAULT_CFG["channels"].items():
+            cfg["channels"].setdefault(k, {})
+            for kk,vv in v.items():
+                cfg["channels"][k].setdefault(kk, vv)
+        # merge checks
+        cfg.setdefault("checks", {})
+        for k,v in DEFAULT_CFG["checks"].items():
+            cfg["checks"].setdefault(k, {})
+            for kk,vv in v.items():
+                cfg["checks"][k].setdefault(kk, vv)
+        cfg.setdefault("throttle_min",  DEFAULT_CFG["throttle_min"])
+        cfg.setdefault("silence_until", DEFAULT_CFG["silence_until"])
+        # se esistono residui "lanwatch", eliminali per pulizia
+        if "lanwatch" in cfg["checks"]:
+            cfg["checks"].pop("lanwatch", None)
         return cfg
     except Exception:
         return DEFAULT_CFG.copy()
@@ -67,6 +82,22 @@ def _head(title:str)->str:
             "<div class='spacer'><a class='btn secondary' href='/'>Home</a></div>"
             "</div>")
 
+# Base URL dinamica per i check HTTP
+def _http_base()->str:
+    try:
+        s = json.loads(SETTINGS_JS.read_text("utf-8"))
+        p = int(s.get("web_port", 8080))
+        return f"http://127.0.0.1:{p}"
+    except Exception:
+        pass
+    try:
+        txt = Path("/etc/apache2/ports.conf").read_text("utf-8")
+        m = re.search(r"^Listen\s+(\d+)", txt, re.M)
+        port = int(m.group(1)) if m else 8080
+        return f"http://127.0.0.1:{port}"
+    except Exception:
+        return "http://127.0.0.1:8080"
+
 @router.get("/alerts", response_class=HTMLResponse)
 def alerts_page(request: Request):
     if not _require_admin(request):
@@ -75,12 +106,19 @@ def alerts_page(request: Request):
     tg  = cfg["channels"]["telegram"]
     sv  = cfg["checks"]["services"]["list"]
     services_text = "\n".join(sv)
+    base_hint = _http_base()
 
     html = _head("Alerting") + f"""
 <div class='grid'>
   <div class='card'>
     <h2>Alerting</h2>
     <p class='muted'>Configura canali e controlli. Il motore gira via systemd timer.</p>
+
+    <div class='note' style='margin-bottom:8px'>
+      <b>Base URL attuale (porta dinamica):</b> {escape(base_hint)}<br/>
+      I check HTTP (Smokeping/Cacti) devono partire da questo valore: niente hardcode della porta.
+    </div>
+
     <form method='post' action='/alerts/config'>
       <h3>Telegram</h3>
       <div class='row' style='gap:8px;flex-wrap:wrap'>
@@ -95,8 +133,8 @@ def alerts_page(request: Request):
         <label class='row' style='gap:6px'><input type='checkbox' name='chk_services' {'checked' if cfg['checks']['services']['enabled'] else ''}/> Servizi</label>
         <label class='row' style='gap:6px'><input type='checkbox' name='chk_disk' {'checked' if cfg['checks']['disk']['enabled'] else ''}/> Disk full</label>
         <label class='row' style='gap:6px'><input type='checkbox' name='chk_smoke' {'checked' if cfg['checks']['smokeping']['enabled'] else ''}/> Smokeping</label>
-        <label class='row' style='gap:6px'><input type='checkbox' name='chk_speed' {'checked' if cfg['checks']['speedtest']['enabled'] else ''}/> Speedtest soglie</label>
         <label class='row' style='gap:6px'><input type='checkbox' name='chk_cacti' {'checked' if cfg['checks']['cacti']['enabled'] else ''}/> Cacti</label>
+        <label class='row' style='gap:6px'><input type='checkbox' name='chk_speed' {'checked' if cfg['checks']['speedtest']['enabled'] else ''}/> Speedtest soglie</label>
         <label class='row' style='gap:6px'><input type='checkbox' name='chk_flow' {'checked' if cfg['checks']['flow']['enabled'] else ''}/> Flussi</label>
         <label class='row' style='gap:6px'><input type='checkbox' name='chk_auth' {'checked' if cfg['checks']['auth']['enabled'] else ''}/> Accesso UI</label>
       </div>
@@ -164,7 +202,9 @@ def alerts_save(request: Request,
     if not _require_admin(request):
         return HTMLResponse("Accesso negato", status_code=403)
     cfg = _ensure_cfg()
+
     cfg["channels"]["telegram"].update({"enabled": bool(tg_enabled), "token": tg_token.strip(), "chat_id": tg_chat.strip()})
+
     cfg["checks"]["services"]["enabled"] = bool(chk_services)
     cfg["checks"]["disk"]["enabled"]     = bool(chk_disk)
     cfg["checks"]["smokeping"]["enabled"]= bool(chk_smoke)
@@ -172,18 +212,21 @@ def alerts_save(request: Request,
     cfg["checks"]["cacti"]["enabled"]    = bool(chk_cacti)
     cfg["checks"]["flow"]["enabled"]     = bool(chk_flow)
     cfg["checks"]["auth"]["enabled"]     = bool(chk_auth)
+
     cfg["checks"]["services"]["list"] = [s.strip() for s in services.splitlines() if s.strip()]
     cfg["checks"]["disk"]["warn_pct"] = int(disk_pct)
     cfg["checks"]["speedtest"]["down_min_mbps"] = int(spd_down)
     cfg["checks"]["speedtest"]["up_min_mbps"]   = int(spd_up)
     cfg["checks"]["speedtest"]["ping_max_ms"]   = int(spd_ping)
-    cfg["checks"]["flow"]["stale_min"]   = int(flow_stale)
+    cfg["checks"]["flow"]["stale_min"]          = int(flow_stale)
     cfg["checks"]["smokeping"]["rrd_fresh_min"] = int(sp_rrd)
     cfg["checks"]["cacti"]["log_stale_min"]     = int(cacti_stale)
-    cfg["checks"]["auth"]["fail_threshold"] = int(auth_threshold)
-    cfg["checks"]["auth"]["window_min"]     = int(auth_window)
-    cfg["throttle_min"] = max(0, int(thr_min))
+    cfg["checks"]["auth"]["fail_threshold"]     = int(auth_threshold)
+    cfg["checks"]["auth"]["window_min"]         = int(auth_window)
+
+    cfg["throttle_min"]  = max(0, int(thr_min))
     cfg["silence_until"] = int(silence) if str(silence).strip().isdigit() else 0
+
     _save_cfg(cfg)
     actor = verify_session_cookie(request) or "unknown"
     log_event("alerts/config", ok=True, actor=actor, detail="saved")

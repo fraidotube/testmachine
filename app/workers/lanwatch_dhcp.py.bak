@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+import json, time, subprocess, shlex, os, sys
+from pathlib import Path
+import re
+
+
+BASE    = Path("/var/lib/netprobe/lanwatch")
+CFGFILE = Path("/etc/netprobe/lanwatch.json")
+DEBUGF  = BASE / "last_run.debug"
+RAW_TXT = BASE / "last_tshark_dhcp.txt"
+RAW_JSON= BASE / "last_tshark_dhcp.json"
+PCAP    = BASE / "last_sniff.pcapng"
+OUTL    = BASE / "dhcp.jsonl"
+RUNHINT = BASE / "run_hint"
+
+DUMPCAP = "/usr/bin/dumpcap"
+TSHARK  = "/usr/bin/tshark"
+
+def _now(): return int(time.time())
+def _ts():  return str(_now())
+
+def log_debug(txt:str):
+    DEBUGF.parent.mkdir(parents=True, exist_ok=True)
+    with open(DEBUGF, "a", encoding="utf-8") as f:
+        f.write(txt.rstrip()+"\n")
+
+def run(cmd:list[str], timeout:int|None=None):
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+    return p.returncode, p.stdout, p.stderr
+
+def load_cfg()->dict:
+    try:
+        cfg = json.loads(CFGFILE.read_text("utf-8"))
+    except Exception:
+        cfg = {}
+    cfg.setdefault("enabled", True)
+    cfg.setdefault("iface", "ens4")
+    cfg.setdefault("dhcp_sniff_sec", 8)
+    cfg.setdefault("dhcp_allow", [])
+    cfg.setdefault("gateway_ip", "")
+    return cfg
+
+def write_jsonl(obj:dict):
+    OUTL.parent.mkdir(parents=True, exist_ok=True)
+    with open(OUTL, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, separators=(",",":"))+"\n")
+
+def main():
+    # reset debug
+    DEBUGF.parent.mkdir(parents=True, exist_ok=True)
+    try: DEBUGF.write_text("", encoding="utf-8")
+    except Exception as e:
+        print(f"ERR reset debug: {e}", file=sys.stderr)
+
+    # sentinel
+    try: (BASE/"worker_started").write_text(_ts(), encoding="utf-8")
+    except: pass
+
+    log_debug(f"[{_ts()}] start lanwatch_dhcp.py pid={os.getpid()} py={sys.executable}")
+
+    # cfg
+    cfg = load_cfg()
+    log_debug(f"[{_ts()}] cfg loaded: {cfg}")
+    if not cfg.get("enabled", True):
+        log_debug(f"[{_ts()}] skip: enabled=false")
+        return 0
+
+    iface = str(cfg.get("iface", "ens4"))
+    sniff_sec = int(cfg.get("dhcp_sniff_sec", 8))
+
+    # run_hint estende la finestra
+    try:
+        if RUNHINT.exists():
+            hint_ts = int((RUNHINT.read_text("utf-8").strip() or "0"))
+            if _now() - hint_ts <= 90:
+                sniff_sec = max(sniff_sec, 15)
+            RUNHINT.unlink(missing_ok=True)
+            log_debug(f"[{_ts()}] applied run_hint -> sniff_sec={sniff_sec}")
+    except Exception as e:
+        log_debug(f"[{_ts()}] run_hint error: {e}")
+
+    # 1) dumpcap
+    cmd = [DUMPCAP,"-i",iface,"-a",f"duration:{sniff_sec}","-f","udp port 67 or 68","-w",str(PCAP)]
+    log_debug(f"[{_ts()}] RUN dumpcap: " + " ".join(shlex.quote(x) for x in cmd))
+    rc,out,err = run(cmd, timeout=sniff_sec+10)
+    log_debug(f"[{_ts()}] dumpcap rc={rc}\nstdout:\n{out}\nstderr:\n{err}")
+
+    if rc != 0:
+        log_debug(f"[{_ts()}] dumpcap failed rc={rc}")
+    if (not PCAP.exists()) or PCAP.stat().st_size == 0 or "Packets captured: 0" in err:
+        write_jsonl({"ts": _now(), "type": "dhcp_summary", "iface": iface,
+                     "offers_seen": 0, "window_s": sniff_sec, "servers": []})
+        log_debug(f"[{_ts()}] 0 packets captured; wrote empty summary")
+        return 0
+
+    # 2) tshark A: solo server->client
+    fields_cmd_A = [
+        TSHARK,"-r",str(PCAP), "-Y","bootp && udp.srcport == 67",
+        "-T","fields","-e","frame.time_epoch","-e","ip.src","-e","eth.src","-e","udp.srcport",
+        "-E","occurrence=f","-E","header=n","-E","separator=\\t"
+    ]
+    log_debug(f"[{_ts()}] RUN tshark A: " + " ".join(shlex.quote(x) for x in fields_cmd_A))
+    rcA,outA,errA = run(fields_cmd_A, timeout=10)
+    log_debug(f"[{_ts()}] tshark A rc={rcA} stderr:\n{errA}")
+
+    lines = [ln.strip() for ln in outA.splitlines() if ln.strip()]
+    if not lines:
+        # fallback B: tutti i BOOTP
+        fields_cmd_B = [
+            TSHARK,"-r",str(PCAP), "-Y","bootp",
+            "-T","fields","-e","frame.time_epoch","-e","ip.src","-e","eth.src","-e","udp.srcport",
+            "-E","occurrence=f","-E","header=n","-E","separator=\\t"
+        ]
+        log_debug(f"[{_ts()}] RUN tshark B: " + " ".join(shlex.quote(x) for x in fields_cmd_B))
+        rcB,outB,errB = run(fields_cmd_B, timeout=10)
+        log_debug(f"[{_ts()}] tshark B rc={rcB} stderr:\n{errB}")
+        lines = [ln.strip() for ln in outB.splitlines() if ln.strip()]
+
+    RAW_TXT.write_text("\n".join(lines)+("\n" if lines else ""), encoding="utf-8")
+
+    servers=set(); events=[]
+    for ln in lines:
+        # accetta sia TAB che backslash come separatore (in alcune build tshark usa "\" come primo char di 'separator=\t')
+	parts = re.split(r'[\t\\]', ln)
+	parts = [p for p in parts if p != ""]
+        if len(parts) < 4: continue
+        try: sport = int(parts[3])
+        except: sport = 0
+        ip_src  = parts[1] if parts[1] else None
+        mac_src = parts[2] if parts[2] else ""
+	log_debug(f"[parse] ln={ln!r} -> parts={parts!r}")
+	log_debug(f"[parse] parsed ip={ip_src!r} mac={mac_src!r} sport={sport!r}")
+	if sport != 67:
+	    m = re.match(r'^\s*([0-9.]+)[\t\\]([0-9.]+)[\t\\]([0-9A-Fa-f:]{17})[\t\\](\d+)\s*$', ln)
+	    if m:
+	        try:
+	            sport = int(m.group(4))
+	            ip_src = m.group(2)
+	            mac_src = m.group(3)
+	        except:
+	            pass
+
+	if sport == 67 and ip_src:
+	    servers.add(ip_src)
+	    events.append({"ts": ts_i, "type": "dhcp_seen", "iface": iface,
+                   "server_ip": ip_src, "server_mac": mac_src, "mtype": None})        
+
+    log_debug(f"[{_ts()}] servers_found={sorted(list(servers))}")
+
+    allow = set(str(x).strip() for x in (cfg.get("dhcp_allow") or []) if str(x).strip())
+    gw    = (cfg.get("gateway_ip") or "").strip()
+
+    offers=[]
+    for sip in sorted(servers):
+        allowed = (sip in allow) or (gw and sip == gw)
+        offers.append({"ts": _now(), "type": "dhcp_offer", "iface": iface,
+                       "server_ip": sip, "server_mac": "", "allowed": bool(allowed)})
+
+    RAW_JSON.write_text(json.dumps({
+        "ts": _now(), "iface": iface, "sniff_s": sniff_sec,
+        "servers": sorted(list(servers)), "offers": offers, "lines": lines
+    }, indent=2), encoding="utf-8")
+
+    for ev in events: write_jsonl(ev)
+    for ev in offers: write_jsonl(ev)
+    write_jsonl({"ts": _now(), "type": "dhcp_summary", "iface": iface,
+                 "offers_seen": len(offers), "window_s": sniff_sec,
+                 "servers": sorted(list(servers))})
+
+    log_debug(f"[{_ts()}] done offers={len(offers)}")
+    return 0
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:
+        try: log_debug(f"[{_ts()}] FATAL: {e!r}")
+        finally: sys.exit(1)

@@ -120,10 +120,7 @@ def alerts_page(request: Request):
     <h2>Alerting</h2>
     <p class='muted'>Configura canali e controlli. Il motore gira via systemd timer.</p>
 
-    <div class='note' style='margin-bottom:8px'>
-      <b>Base URL attuale (porta dinamica):</b> {escape(base_hint)}<br/>
-      I check HTTP (Smokeping/Cacti) devono partire da questo valore: niente hardcode della porta.
-    </div>
+    
 
     <form method='post' action='/alerts/config'>
 

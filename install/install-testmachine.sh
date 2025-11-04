@@ -255,7 +255,6 @@ EOF
   # ------------------ === DHCPSENTINEL === ------------------
   step "Systemd: DHCP Sentinel (service + timer)"
 
-  # service: replica della macchina funzionante
   cat > /etc/systemd/system/netprobe-dhcpsentinel.service <<'EOF'
 [Unit]
 Description=NetProbe DHCP Sentinel (one-shot)
@@ -269,11 +268,9 @@ User=netprobe
 Group=netprobe
 WorkingDirectory=/opt/netprobe/app
 ExecStart=/usr/bin/python3 /opt/netprobe/app/workers/dhcpsentinel.py
-# Capability minime per sniff/send tramite AF_PACKET
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 NoNewPrivileges=no
-# Hardening compatibile con scapy/raw socket
 PrivateTmp=yes
 ProtectHome=read-only
 ProtectSystem=full
@@ -289,22 +286,18 @@ SystemCallFilter=@system-service
 WantedBy=multi-user.target
 EOF
 
-  # timer: identico a quello usato nella macchina ok (2 minuti)
   cat > /etc/systemd/system/netprobe-dhcpsentinel.timer <<'EOF'
 [Unit]
 Description=Run NetProbe DHCP Sentinel periodically
-
 [Timer]
 OnBootSec=30s
 OnUnitActiveSec=120s
 AccuracySec=15s
 Unit=netprobe-dhcpsentinel.service
-
 [Install]
 WantedBy=timers.target
 EOF
 
-  # sudoers dedicato (come macchina funzionante)
   cat > /etc/sudoers.d/netprobe-dhcpsentinel <<'EOF'
 Cmnd_Alias NETPROBE_DHCP = /bin/systemctl start netprobe-dhcpsentinel.service
 netprobe ALL=(root) NOPASSWD: NETPROBE_DHCP
@@ -316,11 +309,11 @@ EOF
 deploy_systemd
 
 # =====================================================================
-# APACHE
+# APACHE (main vhost + moduli)
 # =====================================================================
 step "Apache: moduli & porta ${WEB_PORT}"
 a2enmod proxy proxy_http proxy_wstunnel headers rewrite cgid >/dev/null || true
-a2enmod proxy_fcgi setenvif >/dev/null || true
+a2enmod proxy_fcgi setenvif ssl >/dev/null || true
 sed -ri 's/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*$/# Listen 80/' /etc/apache2/ports.conf
 grep -qE "^[[:space:]]*Listen[[:space:]]+${WEB_PORT}\b" /etc/apache2/ports.conf || echo "Listen ${WEB_PORT}" >> /etc/apache2/ports.conf
 
@@ -336,24 +329,18 @@ cat >/etc/apache2/sites-available/testmachine.conf <<EOF
   ProxyTimeout 120
   AllowEncodedSlashes NoDecode
 
-  # App dietro proxy in HTTP ? NON segnare come https (evita cookie Secure su HTTP)
   RequestHeader set X-Forwarded-Proto "http"
 
-    # --- Esclusioni prima del catch-all ---
   ProxyPass /smokeping/ !
   ProxyPass /cgi-bin/   !
   ProxyPass /cacti/     !
-  
-  # --- WebSocket verso FastAPI (app principale) ---
+
   ProxyPass        /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
   ProxyPassReverse /api/ws   ws://127.0.0.1:${API_PORT}/api/ws
   ProxyPass        /shell/ws ws://127.0.0.1:${API_PORT}/shell/ws
   ProxyPassReverse /shell/ws ws://127.0.0.1:${API_PORT}/shell/ws
 
-  # --- Graylog su /graylog (PRIMA del catch-all) ---
-  # Aiuta Graylog con URL assoluti quando sta sotto un sottopercorso
   RequestHeader set X-Graylog-Server-URL "http://%{HTTP_HOST}s/graylog/"
-
   <Location "/graylog/">
     ProxyPassReverseCookiePath / /graylog/
   </Location>
@@ -362,13 +349,102 @@ cat >/etc/apache2/sites-available/testmachine.conf <<EOF
   ProxyPass        /graylog/api/ws  ws://127.0.0.1:9001/api/ws
   ProxyPassReverse /graylog/api/ws  ws://127.0.0.1:9001/api/ws
 
-  # --- App FastAPI (catch-all) ---
   ProxyPass        /  http://127.0.0.1:${API_PORT}/
   ProxyPassReverse /  http://127.0.0.1:${API_PORT}/
 </VirtualHost>
 EOF
 a2ensite testmachine.conf >/dev/null || true
 a2enconf smokeping >/dev/null || true
+
+# =====================================================================
+# EMBEDDED BROWSER (linuxserver/webtop + vhost TLS gestito da UI)
+# =====================================================================
+
+step "Embedded Browser: servizio Docker linuxserver/webtop su 127.0.0.1:6902"
+cat >/etc/systemd/system/netprobe-webtop.service <<'EOF'
+[Unit]
+Description=NetProbe Embedded Browser (linuxserver/webtop)
+After=docker.service network-online.target
+Wants=docker.service
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/docker pull lscr.io/linuxserver/webtop:latest
+ExecStartPre=/bin/bash -lc 'docker inspect netprobe-webtop >/dev/null 2>&1 || docker create --name netprobe-webtop -p 127.0.0.1:6902:3000 --restart unless-stopped lscr.io/linuxserver/webtop:latest'
+ExecStart=/usr/bin/docker start -a netprobe-webtop
+ExecStop=/usr/bin/docker stop netprobe-webtop
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now netprobe-webtop.service || true
+
+step "Embedded Browser: template vhost TLS per UI"
+install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" /opt/netprobe/templates
+cat >/opt/netprobe/templates/browser-vhost-ssl.conf.tmpl <<'EOF'
+Listen {{PORT}}
+<VirtualHost *:{{PORT}}>
+  ServerName {{SERVERNAME}}
+  ErrorLog  /var/log/apache2/browser-ssl-{{PORT}}-error.log
+  CustomLog /var/log/apache2/browser-ssl-{{PORT}}-access.log combined
+
+  SSLEngine on
+  SSLCertificateFile {{CERT_FILE}}
+  SSLCertificateKeyFile {{CERT_KEY}}
+
+  ProxyPreserveHost On
+  ProxyRequests Off
+  RequestHeader set Connection "upgrade"
+  RequestHeader set Upgrade "websocket"
+
+  # Basic Auth solo se il file esiste
+  <IfFile /etc/apache2/.htpasswd-browser>
+    <Location "/browser/">
+      AuthType Basic
+      AuthName "{{REALM}}"
+      AuthUserFile /etc/apache2/.htpasswd-browser
+      Require valid-user
+    </Location>
+  </IfFile>
+
+  ProxyPass        "/browser/"  "http://127.0.0.1:6902/"
+  ProxyPassReverse "/browser/"  "http://127.0.0.1:6902/"
+  ProxyPass        "/browser/ws" "ws://127.0.0.1:6902/ws"
+  ProxyPassReverse "/browser/ws" "ws://127.0.0.1:6902/ws"
+</VirtualHost>
+EOF
+chown ${APP_USER}:${APP_GROUP} /opt/netprobe/templates/browser-vhost-ssl.conf.tmpl
+chmod 0644 /opt/netprobe/templates/browser-vhost-ssl.conf.tmpl
+
+# Seed vhost di default (8446) – può essere sovrascritto dalla UI
+SELF_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+SELF_IP="${SELF_IP:-127.0.0.1}"
+if [[ ! -e /etc/apache2/sites-available/browser-ssl-8446.conf ]]; then
+  sed -e "s/{{PORT}}/8446/g" \
+      -e "s/{{SERVERNAME}}/${SELF_IP}/g" \
+      -e "s#{{CERT_FILE}}#/etc/ssl/certs/ssl-cert-snakeoil.pem#g" \
+      -e "s#{{CERT_KEY}}#/etc/ssl/private/ssl-cert-snakeoil.key#g" \
+      -e "s/{{REALM}}/TestMachine Browser/g" \
+      /opt/netprobe/templates/browser-vhost-ssl.conf.tmpl \
+      > /etc/apache2/sites-available/browser-ssl-8446.conf
+  a2ensite browser-ssl-8446.conf >/dev/null || true
+fi
+
+# Sudoers per la UI Browser (htpasswd, a2ensite/a2dissite, tee, reload)
+step "Sudoers: permessi UI Embedded Browser"
+awk 'BEGIN{p=1} {print} END{}' >/etc/sudoers.d/netprobe-browser <<'EOF'
+Defaults:netprobe !requiretty
+Cmnd_Alias NP_BROWSER = \
+  /usr/bin/htpasswd -Bbc /etc/apache2/.htpasswd-browser *, \
+  /usr/sbin/a2ensite browser-ssl-*.conf, \
+  /usr/sbin/a2dissite browser-ssl-*.conf, \
+  /usr/bin/tee /etc/apache2/sites-available/browser-ssl-*.conf, \
+  /bin/systemctl reload apache2, /usr/bin/systemctl reload apache2
+netprobe ALL=(root) NOPASSWD: NP_BROWSER
+EOF
+chmod 0440 /etc/sudoers.d/netprobe-browser
+visudo -cf /etc/sudoers.d/netprobe-browser >/dev/null || true
 
 # =====================================================================
 # WORKDIR & SUDOERS GENERALI APP
@@ -390,7 +466,6 @@ install -d -m 0770 -o "${APP_USER}" -g "${APP_GROUP}" /var/lib/netprobe/dhcpsent
 [[ -f /var/lib/netprobe/dhcpsentinel/events.jsonl ]] || { : > /var/lib/netprobe/dhcpsentinel/events.jsonl; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/dhcpsentinel/events.jsonl; chmod 0660 /var/lib/netprobe/dhcpsentinel/events.jsonl; }
 [[ -f /var/lib/netprobe/dhcpsentinel/last.json   ]] || { echo '{}' > /var/lib/netprobe/dhcpsentinel/last.json; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/dhcpsentinel/last.json; chmod 0660 /var/lib/netprobe/dhcpsentinel/last.json; }
 [[ -f /var/lib/netprobe/dhcpsentinel/alerts.clear.ts ]] || { echo 0 > /var/lib/netprobe/dhcpsentinel/alerts.clear.ts; chown ${APP_USER}:${APP_GROUP} /var/lib/netprobe/dhcpsentinel/alerts.clear.ts; chmod 0644 /var/lib/netprobe/dhcpsentinel/alerts.clear.ts; }
-
 
 step "Sudoers operazioni UI"
 cat >/etc/sudoers.d/netprobe-ops <<'EOF'
@@ -416,22 +491,18 @@ Cmnd_Alias NP_SVC = \
   /bin/systemctl start netprobe-dhcpsentinel.service, /usr/bin/systemctl start netprobe-dhcpsentinel.service
 Cmnd_Alias NP_TIME = /usr/bin/timedatectl *, /bin/timedatectl *
 Cmnd_Alias NP_NM   = /usr/bin/nmcli *
-# Lettura sicura password DB Cacti dalla UI
 Cmnd_Alias NP_CACTI = /usr/bin/cat /etc/cacti/debian.php, /bin/cat /etc/cacti/debian.php
-# Esecuzione installer da UI (entrambe le posizioni)
 Cmnd_Alias NP_UPDATE = \
   /usr/bin/env DEBIAN_FRONTEND=noninteractive /opt/netprobe/install-testmachine.sh *, \
   /bin/bash /opt/netprobe/install-testmachine.sh *, \
   /usr/bin/env DEBIAN_FRONTEND=noninteractive /opt/netprobe/install/install-testmachine.sh *, \
   /bin/bash /opt/netprobe/install/install-testmachine.sh *
-# Power (reboot/shutdown) + systemd-run per reboot pianificato
 Cmnd_Alias NP_POWER = \
   /sbin/reboot, /usr/sbin/reboot, \
   /bin/systemctl reboot, /usr/bin/systemctl reboot, \
   /usr/sbin/shutdown -r now *, /usr/sbin/shutdown -r +* *, \
   /bin/systemd-run *, /usr/bin/systemd-run *
 netprobe ALL=(root) NOPASSWD: NP_COPY, NP_SVC, NP_TIME, NP_NM, NP_CACTI, NP_UPDATE, NP_POWER
-
 EOF
 chmod 440 /etc/sudoers.d/netprobe-ops
 visudo -cf /etc/sudoers.d/netprobe-ops || { echo "Errore in /etc/sudoers.d/netprobe-ops"; exit 1; }
@@ -521,16 +592,11 @@ if [[ -f /etc/cron.d/cacti ]] && grep -q 'poller\.php' /etc/cron.d/cacti; then
 else
   echo "ATTENZIONE: /etc/cron.d/cacti mancante o senza poller.php."
 fi
-
-# prima esecuzione (opzionale) – corretto: --force
 sudo -u www-data -- php /usr/share/cacti/site/poller.php --force || true
-
 
 # ---- Host tuning per OpenSearch/Mongo ----
 step "Tuning host per OpenSearch/Mongo (vm.max_map_count, file-max, AVX check)"
-# vm.max_map_count per OpenSearch
 sysctl -w vm.max_map_count=262144 >/dev/null
-# alziamo anche file-max in modo conservativo
 sysctl -w fs.file-max=131072 >/dev/null
 cat >/etc/sysctl.d/99-opensearch.conf <<'EOF'
 vm.max_map_count=262144
@@ -538,11 +604,9 @@ fs.file-max=131072
 EOF
 sysctl --system >/dev/null || true
 
-# Avviso se la CPU non ha AVX/AVX2
 if ! grep -q -m1 -E 'avx(2)?' /proc/cpuinfo; then
   echo "ATTENZIONE: CPU senza AVX -> OpenSearch 2.x e MongoDB 6 potrebbero non avviarsi."
 fi
-
 
 # =====================================================================
 # GRAYLOG (Docker stack)
@@ -552,16 +616,13 @@ step "Graylog stack (docker compose)"
 GL_DIR=/opt/netprobe/graylog
 install -d -m 0755 -o ${APP_USER} -g ${APP_GROUP} "${GL_DIR}"
 
-# IP per HTTP_EXTERNAL_URI
 SELF_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
 SELF_IP="${SELF_IP:-127.0.0.1}"
 
-# segreti/password (default admin/admin)
 GL_SECRET="$(openssl rand -hex 64)"
 GL_SHA="$(printf %s 'admin' | sha256sum | awk '{print $1}')"
 GL_EXT_URI="http://${SELF_IP}:${WEB_PORT}/graylog/"
 
-# .env (idempotente)
 ENV_FILE="${GL_DIR}/.env"
 if [[ -f "${ENV_FILE}" ]]; then
   sed -i "s|^GRAYLOG_HTTP_EXTERNAL_URI=.*|GRAYLOG_HTTP_EXTERNAL_URI=${GL_EXT_URI}|" "${ENV_FILE}"
@@ -575,7 +636,6 @@ EOF
   chmod 0640 "${ENV_FILE}"
 fi
 
-# docker-compose.yml
 if [[ ! -s "${GL_DIR}/docker-compose.yml" ]]; then
   cat > "${GL_DIR}/docker-compose.yml" <<'YAML'
 services:
@@ -647,7 +707,6 @@ YAML
   chown ${APP_USER}:${APP_GROUP} "${GL_DIR}/docker-compose.yml"
 fi
 
-# systemd unit (wrapper dcompose)
 if [[ ! -s /etc/systemd/system/graylog-stack.service ]]; then
   cat >/etc/systemd/system/graylog-stack.service <<'EOF'
 [Unit]
@@ -731,18 +790,20 @@ fi
 # =====================================================================
 # RIAVVII & CHECK FINALI
 # =====================================================================
-step "Riavvio servizi (PHP-FPM/Apache/SmokePing) + timer alert/speedtest"
+step "Riavvio servizi (PHP-FPM/Apache/SmokePing) + timer alert/speedtest + webtop"
 systemctl reload php${PHPVER}-fpm || true
 systemctl restart smokeping || true
 systemctl reload apache2 || systemctl restart apache2
 systemctl enable --now netprobe-alertd.timer  || true
 systemctl enable --now netprobe-speedtestd.timer || true
 systemctl enable --now netprobe-dhcpsentinel.timer || true
+systemctl enable --now netprobe-webtop.service || true
 
 step "Check finali"
 systemctl is-active --quiet netprobe-api.socket && echo "API socket OK"
 systemctl is-active --quiet smokeping && echo "SmokePing OK"
 systemctl is-active --quiet cron && echo "cron OK (attivo)"
+systemctl is-active --quiet netprobe-webtop.service && echo "WebTop OK (127.0.0.1:6902)"
 apachectl -t || true
 echo -n "HTTP /            : "; curl -sI "http://127.0.0.1:${WEB_PORT}/" | head -n1 || true
 echo -n "HTTP /smokeping/  : "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping/" | head -n1 || true

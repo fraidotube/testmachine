@@ -57,7 +57,7 @@ PATH_ROLES = {
     "/shell": ["admin"],
     "/alerts": ["admin"],
     "/api/browser": ["admin"],
-    "/browser":     ["admin"],   # la pagina /browser (UI)
+    "/browser-ui":     ["admin"],   # la pagina /browser (UI)
 
 
 }

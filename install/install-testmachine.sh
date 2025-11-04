@@ -63,7 +63,7 @@ if [[ -f "$SNMPCFG" ]]; then
 fi
 
 # ---------------------------------------------------------------------
-# Docker CE (repo ufficiale) + compose v2 wrapper
+# Docker CE (repo ufficiale) + compose wrapper
 # ---------------------------------------------------------------------
 step "Docker CE + compose (repo ufficiale)"
 install -m 0755 -d /etc/apt/keyrings
@@ -254,7 +254,6 @@ EOF
 
   # ------------------ === DHCPSENTINEL === ------------------
   step "Systemd: DHCP Sentinel (service + timer)"
-
   cat > /etc/systemd/system/netprobe-dhcpsentinel.service <<'EOF'
 [Unit]
 Description=NetProbe DHCP Sentinel (one-shot)
@@ -285,7 +284,6 @@ SystemCallFilter=@system-service
 [Install]
 WantedBy=multi-user.target
 EOF
-
   cat > /etc/systemd/system/netprobe-dhcpsentinel.timer <<'EOF'
 [Unit]
 Description=Run NetProbe DHCP Sentinel periodically
@@ -297,14 +295,12 @@ Unit=netprobe-dhcpsentinel.service
 [Install]
 WantedBy=timers.target
 EOF
-
   cat > /etc/sudoers.d/netprobe-dhcpsentinel <<'EOF'
 Cmnd_Alias NETPROBE_DHCP = /bin/systemctl start netprobe-dhcpsentinel.service
 netprobe ALL=(root) NOPASSWD: NETPROBE_DHCP
 EOF
   chmod 0440 /etc/sudoers.d/netprobe-dhcpsentinel
   visudo -cf /etc/sudoers.d/netprobe-dhcpsentinel >/dev/null || true
-
 }
 deploy_systemd
 
@@ -360,20 +356,32 @@ a2enconf smokeping >/dev/null || true
 # EMBEDDED BROWSER (linuxserver/webtop + vhost TLS gestito da UI)
 # =====================================================================
 
+# Directory stack + data
+install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" /opt/netprobe/webtop /opt/netprobe/webtop/data
+
 step "Embedded Browser: servizio Docker linuxserver/webtop su 127.0.0.1:6902"
 cat >/etc/systemd/system/netprobe-webtop.service <<'EOF'
 [Unit]
 Description=NetProbe Embedded Browser (linuxserver/webtop)
 After=docker.service network-online.target
 Wants=docker.service
+
 [Service]
 Type=simple
 ExecStartPre=/usr/bin/docker pull lscr.io/linuxserver/webtop:latest
-ExecStartPre=/bin/bash -lc 'docker inspect netprobe-webtop >/dev/null 2>&1 || docker create --name netprobe-webtop -p 127.0.0.1:6902:3000 --restart unless-stopped lscr.io/linuxserver/webtop:latest'
+ExecStartPre=/bin/bash -lc 'docker rm -f netprobe-webtop >/dev/null 2>&1 || true'
+ExecStartPre=/bin/bash -lc 'docker create --name netprobe-webtop \
+  -e PUID=0 -e PGID=0 -e TZ=Europe/Rome \
+  -p 127.0.0.1:6902:3000 \
+  --restart unless-stopped \
+  --shm-size=1g \
+  -v /opt/netprobe/webtop/data:/config \
+  lscr.io/linuxserver/webtop:latest'
 ExecStart=/usr/bin/docker start -a netprobe-webtop
 ExecStop=/usr/bin/docker stop netprobe-webtop
 Restart=always
 RestartSec=5
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -384,49 +392,44 @@ systemctl enable --now netprobe-webtop.service || true
 step "Apache TLS: ssl-cert + snakeoil + mod_ssl"
 apt-get install -y --no-install-recommends ssl-cert openssl
 a2enmod ssl >/dev/null || true
-
-# genera/rigenera i certificati snakeoil se mancanti
 if [[ ! -s /etc/ssl/certs/ssl-cert-snakeoil.pem || ! -s /etc/ssl/private/ssl-cert-snakeoil.key ]]; then
   make-ssl-cert generate-default-snakeoil --force-overwrite || true
 fi
-
-# permessi corretti sulla key (dovrebbe già essere 640 root:ssl-cert)
 chgrp ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
 chmod 0640 /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
 
-
-step "Embedded Browser: template vhost TLS per UI"
+step "Embedded Browser: template vhost TLS per UI (versione WebSocket corretta)"
 install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" /opt/netprobe/templates
 cat >/opt/netprobe/templates/browser-vhost-ssl.conf.tmpl <<'EOF'
 Listen {{PORT}}
 <VirtualHost *:{{PORT}}>
   ServerName {{SERVERNAME}}
-  ErrorLog  /var/log/apache2/browser-ssl-{{PORT}}-error.log
-  CustomLog /var/log/apache2/browser-ssl-{{PORT}}-access.log combined
 
   SSLEngine on
   SSLCertificateFile {{CERT_FILE}}
   SSLCertificateKeyFile {{CERT_KEY}}
 
   ProxyPreserveHost On
-  ProxyRequests Off
-  RequestHeader set Connection "upgrade"
-  RequestHeader set Upgrade "websocket"
+  RequestHeader set X-Forwarded-Proto "https"
+  RequestHeader set X-Forwarded-Port "{{PORT}}"
 
-  # Basic Auth solo se il file esiste
-  <IfFile /etc/apache2/.htpasswd-browser>
-    <Location "/browser/">
-      AuthType Basic
-      AuthName "{{REALM}}"
-      AuthUserFile /etc/apache2/.htpasswd-browser
+  <Location "/browser/">
+    AuthType Basic
+    AuthName "{{REALM}}"
+    AuthUserFile /etc/apache2/.htpasswd-browser
+    <RequireAny>
+      Require expr "! -f '/etc/apache2/.htpasswd-browser'"
       Require valid-user
-    </Location>
-  </IfFile>
+    </RequireAny>
+  </Location>
 
-  ProxyPass        "/browser/"  "http://127.0.0.1:6902/"
-  ProxyPassReverse "/browser/"  "http://127.0.0.1:6902/"
-  ProxyPass        "/browser/ws" "ws://127.0.0.1:6902/ws"
-  ProxyPassReverse "/browser/ws" "ws://127.0.0.1:6902/ws"
+  ProxyPass        "/browser/" "ws://127.0.0.1:6902/"
+  ProxyPassReverse "/browser/" "ws://127.0.0.1:6902/"
+  ProxyPass        "/browser/" "http://127.0.0.1:6902/"
+  ProxyPassReverse "/browser/" "http://127.0.0.1:6902/"
+
+  ErrorLog  ${APACHE_LOG_DIR}/browser_{{PORT}}_error.log
+  CustomLog ${APACHE_LOG_DIR}/browser_{{PORT}}_access.log combined
 </VirtualHost>
 EOF
 chown ${APP_USER}:${APP_GROUP} /opt/netprobe/templates/browser-vhost-ssl.conf.tmpl
@@ -444,11 +447,12 @@ if [[ ! -e /etc/apache2/sites-available/browser-ssl-8446.conf ]]; then
       /opt/netprobe/templates/browser-vhost-ssl.conf.tmpl \
       > /etc/apache2/sites-available/browser-ssl-8446.conf
   a2ensite browser-ssl-8446.conf >/dev/null || true
+  apachectl -t && systemctl reload apache2 || true
 fi
 
 # Sudoers per la UI Browser (htpasswd, a2ensite/a2dissite, tee, reload)
 step "Sudoers: permessi UI Embedded Browser"
-awk 'BEGIN{p=1} {print} END{}' >/etc/sudoers.d/netprobe-browser <<'EOF'
+cat >/etc/sudoers.d/netprobe-browser <<'EOF'
 Defaults:netprobe !requiretty
 Cmnd_Alias NP_BROWSER = \
   /usr/bin/htpasswd -Bbc /etc/apache2/.htpasswd-browser *, \
@@ -618,7 +622,6 @@ vm.max_map_count=262144
 fs.file-max=131072
 EOF
 sysctl --system >/dev/null || true
-
 if ! grep -q -m1 -E 'avx(2)?' /proc/cpuinfo; then
   echo "ATTENZIONE: CPU senza AVX -> OpenSearch 2.x e MongoDB 6 potrebbero non avviarsi."
 fi
@@ -825,6 +828,8 @@ echo -n "HTTP /smokeping/  : "; curl -sI "http://127.0.0.1:${WEB_PORT}/smokeping
 echo -n "HTTP /cacti/      : "; curl -sI "http://127.0.0.1:${WEB_PORT}/cacti/" | head -n1 || true
 echo -n "Graylog backend   : "; curl -sI "http://127.0.0.1:9001/" | head -n1 || true
 echo -n "Graylog via proxy : "; curl -sI "http://127.0.0.1:${WEB_PORT}/graylog/" | head -n1 || true
+echo -n "Webtop 6902       : "; curl -sI "http://127.0.0.1:6902/" | head -n1 || true
+echo -n "Browser vhost URL : "; echo "https://$(hostname -I | awk '{print $1}'):8446/browser/"
 echo "Container:"
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | sed 's/^/  /'
 

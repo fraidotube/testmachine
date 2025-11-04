@@ -1,0 +1,30 @@
+Listen {{PORT}}
+<VirtualHost *:{{PORT}}>
+  ServerName {{SERVERNAME}}
+
+  SSLEngine on
+  SSLCertificateFile {{CERT_FILE}}
+  SSLCertificateKeyFile {{CERT_KEY}}
+
+  ProxyPreserveHost On
+  RequestHeader set X-Forwarded-Proto "https"
+  RequestHeader set X-Forwarded-Port "{{PORT}}"
+
+  <Location "/browser/">
+    AuthType Basic
+    AuthName "{{REALM}}"
+    AuthUserFile /etc/apache2/.htpasswd-browser
+    <RequireAny>
+      Require expr "! -f '/etc/apache2/.htpasswd-browser'"
+      Require valid-user
+    </RequireAny>
+  </Location>
+
+  ProxyPass        "/browser/" "ws://127.0.0.1:6902/"
+  ProxyPassReverse "/browser/" "ws://127.0.0.1:6902/"
+  ProxyPass        "/browser/" "http://127.0.0.1:6902/"
+  ProxyPassReverse "/browser/" "http://127.0.0.1:6902/"
+
+  ErrorLog  ${APACHE_LOG_DIR}/browser_{{PORT}}_error.log
+  CustomLog ${APACHE_LOG_DIR}/browser_{{PORT}}_access.log combined
+</VirtualHost>

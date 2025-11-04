@@ -1,0 +1,24 @@
+<VirtualHost *:{{PORT}}>
+  ServerName {{SERVERNAME}}
+
+  SSLEngine on
+  SSLCertificateFile {{CERT_FILE}}
+  SSLCertificateKeyFile {{CERT_KEY}}
+
+  ProxyRequests Off
+  ProxyPreserveHost On
+  RequestHeader set X-Forwarded-Proto "https"
+
+  # WS: mappa sia /websocket sia /websockets → backend /websocket
+  ProxyPass        "/browser/websocket"  "ws://127.0.0.1:6902/websocket"
+  ProxyPassReverse "/browser/websocket"  "ws://127.0.0.1:6902/websocket"
+  ProxyPass        "/browser/websockets" "ws://127.0.0.1:6902/websocket"
+  ProxyPassReverse "/browser/websockets" "ws://127.0.0.1:6902/websocket"
+
+  # HTTP (statici/app)
+  ProxyPass        "/browser/" "http://127.0.0.1:6902/"
+  ProxyPassReverse "/browser/" "http://127.0.0.1:6902/"
+
+  ErrorLog  /var/log/apache2/browser_{{PORT}}_error.log
+  CustomLog /var/log/apache2/browser_{{PORT}}_access.log combined
+</VirtualHost>

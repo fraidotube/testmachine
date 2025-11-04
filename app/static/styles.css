@@ -256,6 +256,7 @@ code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mo
 .card--nat{       background: linear-gradient(160deg, rgba(23,100,100,0.25), rgba(100,0,0,.80)) !important; border: 1px solid rgba(255,255,255,.35); !important; }
 .card--graylog{   background: linear-gradient(160deg, rgba(123,00,100,0.25), rgba(100,150,0,.80)) !important; border: 1px solid rgba(255,255,255,.35); !important; }
 .card--dhcpsentinel{   background: linear-gradient(160deg, rgba(50,50,100,0.25), rgba(0,150,50,.80)) !important; border: 1px solid rgba(255,255,255,.35); !important; }
+.card--browser{   background: linear-gradient(160deg, rgba(50,50,50,0.25), rgba(200,100,0,.80)) !important; border: 1px solid rgba(255,255,255,.35); !important; }
 
 /* ---------------- Servizi (home) ---------------- */
 .hr-thin{
@@ -285,3 +286,7 @@ code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mo
 .bgpicker{ display:flex; align-items:center; gap:10px; margin:8px 0 24px; justify-content:flex-end; }
 .bgpicker label{ white-space:nowrap; opacity:.9; }
 .bgpicker .bgsel{ width:auto !important; min-width:160px; max-width:260px; display:inline-block !important; padding:8px 10px; border-radius:10px; }
+
+
+/* Bottoni compatti per la browser-ui */
+.btn.sm{ padding:7px 12px; font-size:.95rem; border-radius:8px; }

@@ -380,6 +380,21 @@ EOF
 systemctl daemon-reload
 systemctl enable --now netprobe-webtop.service || true
 
+# --- TLS prerequisiti per vhost HTTPS del Browser ---
+step "Apache TLS: ssl-cert + snakeoil + mod_ssl"
+apt-get install -y --no-install-recommends ssl-cert openssl
+a2enmod ssl >/dev/null || true
+
+# genera/rigenera i certificati snakeoil se mancanti
+if [[ ! -s /etc/ssl/certs/ssl-cert-snakeoil.pem || ! -s /etc/ssl/private/ssl-cert-snakeoil.key ]]; then
+  make-ssl-cert generate-default-snakeoil --force-overwrite || true
+fi
+
+# permessi corretti sulla key (dovrebbe già essere 640 root:ssl-cert)
+chgrp ssl-cert /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
+chmod 0640 /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
+
+
 step "Embedded Browser: template vhost TLS per UI"
 install -d -m 0755 -o "${APP_USER}" -g "${APP_GROUP}" /opt/netprobe/templates
 cat >/opt/netprobe/templates/browser-vhost-ssl.conf.tmpl <<'EOF'
